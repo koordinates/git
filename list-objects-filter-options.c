@@ -15,6 +15,11 @@ static int parse_combine_filter(
 	const char *arg,
 	struct strbuf *errbuf);
 
+static int parse_profile_filter(
+	struct list_objects_filter_options *filter_options,
+	const char *arg,
+	struct strbuf *errbuf);
+
 const char *list_object_filter_config_name(enum list_objects_filter_choice c)
 {
 	switch (c) {
@@ -29,6 +34,8 @@ const char *list_object_filter_config_name(enum list_objects_filter_choice c)
 		return "tree";
 	case LOFC_SPARSE_OID:
 		return "sparse:oid";
+	case LOFC_PROFILE:
+		return "profile";
 	case LOFC_COMBINE:
 		return "combine";
 	case LOFC__COUNT:
@@ -88,6 +95,9 @@ static int gently_parse_list_objects_filter(
 		filter_options->sparse_oid_name = xstrdup(v0);
 		filter_options->choice = LOFC_SPARSE_OID;
 		return 0;
+
+	} else if (skip_prefix(arg, "profile:", &v0)) {
+		return parse_profile_filter(filter_options, v0, errbuf);
 
 	} else if (skip_prefix(arg, "sparse:path=", &v0)) {
 		if (errbuf) {
@@ -187,6 +197,41 @@ static int parse_combine_filter(
 
 cleanup:
 	strbuf_list_free(subspecs);
+	if (result) {
+		list_objects_filter_release(filter_options);
+		memset(filter_options, 0, sizeof(*filter_options));
+	}
+	return result;
+}
+
+static int parse_profile_filter(
+	struct list_objects_filter_options *filter_options,
+	const char *arg,
+	struct strbuf *errbuf)
+{
+	int result = 0;
+	struct strbuf **params = strbuf_split_str(arg, '=', 2);
+
+	if (!params[0]) {
+		strbuf_addstr(errbuf, _("expected 'profile:<name>[=<parameter>]'"));
+		result = 1;
+		goto cleanup;
+	}
+
+	if (params[1]) {
+		// This profile has a parameter. Remove trailing "=" from the name.
+		size_t last = params[0]->len - 1;
+		assert(params[0]->buf[last] == '=');
+		strbuf_remove(params[0], last, 1);
+
+		filter_options->profile_value = xstrdup(params[1]->buf);
+	}
+
+	filter_options->profile_name = xstrdup(params[0]->buf);
+	filter_options->choice = LOFC_PROFILE;
+
+cleanup:
+	strbuf_list_free(params);
 	if (result) {
 		list_objects_filter_release(filter_options);
 		memset(filter_options, 0, sizeof(*filter_options));
@@ -334,6 +379,8 @@ void list_objects_filter_release(
 		return;
 	string_list_clear(&filter_options->filter_spec, /*free_util=*/0);
 	free(filter_options->sparse_oid_name);
+	free(filter_options->profile_name);
+	free(filter_options->profile_value);
 	for (sub = 0; sub < filter_options->sub_nr; sub++)
 		list_objects_filter_release(&filter_options->sub[sub]);
 	free(filter_options->sub);

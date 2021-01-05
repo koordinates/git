@@ -60,6 +60,12 @@ enum list_objects_filter_situation {
 	LOFS_BLOB
 };
 
+enum list_objects_filter_omit {
+       LOFO_KEEP = -1,
+       LOFO_IGNORE = 0,
+       LOFO_OMIT = 1,
+};
+
 struct filter;
 
 /*
@@ -91,5 +97,29 @@ enum list_objects_filter_result list_objects_filter__filter_object(
  * nothing if `filter` is null.
  */
 void list_objects_filter__free(struct filter *filter);
+
+/*
+ * Profile Filters
+ */
+
+typedef int (list_objects_filter_profile_init_fn)(
+    const struct repository* r,
+    const char* filter_arg,
+    void *context
+);
+typedef enum list_objects_filter_result (list_objects_filter_profile_filter_fn)(
+	const struct repository *r,
+	const enum list_objects_filter_situation filter_situation,
+	struct object *obj,
+	const char *pathname,
+	const char *filename,
+	enum list_objects_filter_omit *omit,
+	void *context
+);
+typedef void (list_objects_filter_profile_free_fn)(
+    const struct repository* r,
+    void *context
+);
+
 
 #endif /* LIST_OBJECTS_FILTER_H */

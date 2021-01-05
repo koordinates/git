@@ -1,5 +1,12 @@
+#include <dlfcn.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+
 #include "cache.h"
+#include "config.h"
 #include "dir.h"
+#include "exec-cmd.h"
 #include "tag.h"
 #include "commit.h"
 #include "tree.h"
@@ -10,9 +17,13 @@
 #include "list-objects.h"
 #include "list-objects-filter.h"
 #include "list-objects-filter-options.h"
+#include "list-objects-filter-profile.h"
 #include "oidmap.h"
 #include "oidset.h"
 #include "object-store.h"
+#include "quote.h"
+#include "run-command.h"
+
 
 /* Remember to update object flag allocation in object.h */
 /*
@@ -505,6 +516,134 @@ static void filter_sparse_oid__init(
 	filter->free_fn = filter_sparse_free;
 }
 
+/*
+ * A filter which passes the objects to an external library plugin.
+ * The plugin needs to implement the interface defined in
+ * git-list-filter-profile.h.
+ */
+
+struct filter_profile_data {
+	void *plugin_lib;
+	void *context;
+
+	list_objects_filter_profile_init_fn *init_func;
+	list_objects_filter_profile_filter_fn *filter_func;
+	list_objects_filter_profile_free_fn *free_func;
+};
+
+static enum list_objects_filter_result filter_profile_filter_object(
+	struct repository *r,
+	enum list_objects_filter_situation filter_situation,
+	struct object *obj,
+	const char *pathname,
+	const char *filename,
+	struct oidset *omits,
+	void *filter_data_)
+{
+	struct filter_profile_data *filter_data = filter_data_;
+
+	enum list_objects_filter_omit omit_it = LOFO_IGNORE;
+
+	enum list_objects_filter_result ret = filter_data->filter_func(
+		r,
+		filter_situation,
+		obj,
+		pathname,
+		filename,
+		&omit_it,
+		&filter_data->context);
+
+	if (omits) {
+		if (omit_it == LOFO_KEEP)
+			oidset_remove(omits, &obj->oid);
+		else if (omit_it == LOFO_OMIT)
+			oidset_insert(omits, &obj->oid);
+	}
+	return ret;
+}
+
+static void filter_profile_free(void *filter_data)
+{
+	struct filter_profile_data *d = filter_data;
+	d->free_func(the_repository, &d->context);
+	dlclose(d->plugin_lib);
+	free(d);
+}
+
+static void filter_profile__init(
+	struct list_objects_filter_options *filter_options,
+	struct filter *filter)
+{
+	struct filter_profile_data *d = xcalloc(1, sizeof(*d));
+	struct strbuf sb = STRBUF_INIT;
+
+	char *plugin_key;
+	char *profile_plugin;
+	const char* profile_plugin_path;
+
+	plugin_key = xstrfmt("uploadpackfilter.profile:%s.plugin",
+		filter_options->profile_name);
+
+	if (git_config_get_string(plugin_key, &profile_plugin)) {
+		die(_("filter profile not found: %s"),
+			filter_options->profile_name);
+	}
+
+	if (is_absolute_path(profile_plugin)) {
+		profile_plugin_path = profile_plugin;
+	} else {
+		strbuf_addf(&sb, "%s/%s", git_exec_path(), profile_plugin);
+		if (strbuf_normalize_path(&sb) < 0)
+			die(_("error resolving filter profile %s"),
+				profile_plugin);
+		profile_plugin_path = sb.buf;
+	}
+
+	void *lib_handle = dlopen(profile_plugin_path, RTLD_NOW);
+	if (!lib_handle) {
+		die(_("error loading filter profile %s from %s: %s"),
+			filter_options->profile_name, profile_plugin_path,
+			dlerror());
+	}
+
+	strbuf_release(&sb);
+
+	d->init_func = dlsym(lib_handle, "git_filter_profile_init");
+	if (dlerror()) {
+		dlclose(lib_handle);
+		die(_("error loading git_filter_profile_init() from %s: %s"),
+			filter_options->profile_plugin, dlerror());
+	}
+	d->filter_func = dlsym(lib_handle, "git_filter_profile_object");
+	if (dlerror()) {
+		dlclose(lib_handle);
+		die(_("error loading git_filter_profile_object() from %s: %s"),
+			filter_options->profile_plugin, dlerror());
+	}
+	d->free_func = dlsym(lib_handle, "git_filter_profile_free");
+	if (dlerror()) {
+		dlclose(lib_handle);
+		die(_("error loading git_filter_profile_free() from %s: %s"),
+			filter_options->profile_plugin, dlerror());
+		}
+	d->plugin_lib = lib_handle;
+
+	trace_printf("filter: loaded filter profile %s from %s\n",
+		filter_options->profile_name, profile_plugin_path);
+
+	int r = d->init_func(
+		the_repository, filter_options->profile_value, &d->context);
+	if (r) {
+		dlclose(lib_handle);
+		die(_("error initialising filter profile %s: %d"),
+			filter_options->profile_name, r);
+	}
+
+	filter->filter_data = d;
+	filter->filter_object_fn = filter_profile_filter_object;
+	filter->free_fn = filter_profile_free;
+}
+
 /* A filter which only shows objects shown by all sub-filters. */
 struct combine_filter_data {
 	struct subfilter *sub;
@@ -651,6 +790,7 @@ static filter_init_fn s_filters[] = {
 	filter_blobs_limit__init,
 	filter_trees_depth__init,
 	filter_sparse_oid__init,
+	filter_profile__init,
 	filter_combine__init,
 };
 

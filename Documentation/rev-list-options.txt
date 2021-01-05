@@ -897,6 +897,11 @@ Note that the form '--filter=sparse:path=<path>' that wants to read
 from an arbitrary path on the filesystem has been dropped for security
 reasons.
 +
+The form '--filter=profile:<name>[=<arg>]' uses a dynamic filter library
+to implement a named filter. The path to the filter profile library is defined
+via the config variable `uploadpackfilter.profile:<name>.plugin`. Profiles may
+take an argument string which is passed via `<arg>`.
++
 Multiple '--filter=' flags can be specified to combine filters. Only
 objects which are accepted by every filter are included.
 +

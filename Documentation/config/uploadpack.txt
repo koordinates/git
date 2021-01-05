@@ -65,15 +65,20 @@ uploadpackfilter.allow::
 uploadpackfilter.<filter>.allow::
 	Explicitly allow or ban the object filter corresponding to
 	`<filter>`, where `<filter>` may be one of: `blob:none`,
-	`blob:limit`, `tree`, `sparse:oid`, or `combine`. If using
-	combined filters, both `combine` and all of the nested filter
-	kinds must be allowed. Defaults to `uploadpackfilter.allow`.
+	`blob:limit`, `tree`, `sparse:oid`, `combine`, or a named profile filter
+	`profile:<name>`. If using combined filters, both `combine` and all of the
+	nested filter kinds must be allowed. Defaults to `uploadpackfilter.allow`.
 
 uploadpackfilter.tree.maxDepth::
 	Only allow `--filter=tree:<n>` when `<n>` is no more than the value of
 	`uploadpackfilter.tree.maxDepth`. If set, this also implies
 	`uploadpackfilter.tree.allow=true`, unless this configuration
 	variable had already been set. Has no effect if unset.
+
+uploadpackfilter.profile:<name>.plugin::
+	Path to a plugin library which implements the named filter profile. See
+	`contrib/filter-profiles/README.md` for details. A relative path is
+	resolved with respect to `GIT_EXEC_DIR`.
 
 uploadpack.allowRefInWant::
 	If this option is set, `upload-pack` will support the `ref-in-want`
