@@ -794,7 +794,7 @@ int index_name_pos(const struct index_state *, const char *name, int namelen);
 static inline int index_pos_to_insert_pos(uintmax_t pos)
 {
 	if (pos > INT_MAX)
-		die("overflow: -1 - %"PRIuMAX, pos);
+		die("overflow: -1 - %" PRIuMAX, pos);
 	return -1 - (int)pos;
 }
 
