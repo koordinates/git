@@ -1894,6 +1894,10 @@ ifdef NEED_ACCESS_ROOT_HANDLER
 	COMPAT_OBJS += compat/access.o
 endif
 
+ifdef FILTER_PROFILES
+	BASIC_LDFLAGS += -rdynamic
+endif
+
 ifeq ($(TCLTK_PATH),)
 NO_TCLTK = NoThanks
 endif
@@ -2118,6 +2122,20 @@ ifndef NO_TCLTK
 	$(QUIET_SUBDIR0)gitk-git $(QUIET_SUBDIR1) all
 endif
 	$(QUIET_SUBDIR0)templates $(QUIET_SUBDIR1) SHELL_PATH='$(SHELL_PATH_SQ)' PERL_PATH='$(PERL_PATH_SQ)'
+
+ifneq ($(FILTER_PROFILES),)
+$(FILTER_PROFILES):
+	$(QUIET_SUBDIR0)$@ $(QUIET_SUBDIR1) \
+		ALL_CFLAGS='$(subst ','\'',$(ALL_CFLAGS))' \
+		ALL_LDFLAGS='$(subst ','\'',$(ALL_LDFLAGS))' \
+		PROFILE_DIR='$(subst ','\'',$(PROFILE_DIR))' \
+		all
+.PHONY: $(FILTER_PROFILES)
+
+filter-profiles: git$X $(FILTER_PROFILES)
+
+all:: filter-profiles
+endif
 
 please_set_SHELL_PATH_to_a_more_modern_shell:
 	@$$(:)
@@ -2541,6 +2559,7 @@ $(LIB_FILE): $(LIB_OBJS)
 
 $(XDIFF_LIB): $(XDIFF_OBJS)
 	$(QUIET_AR)$(RM) $@ && $(AR) $(ARFLAGS) $@ $^
+
 
 export DEFAULT_EDITOR DEFAULT_PAGER
 
@@ -2970,6 +2989,9 @@ ifndef NO_TCLTK
 	$(MAKE) -C gitk-git install
 	$(MAKE) -C git-gui gitexecdir='$(gitexec_instdir_SQ)' install
 endif
+ifneq ($(FILTER_PROFILES),)
+	$(foreach PF,$(FILTER_PROFILES),$(MAKE) -C $(PF) DESTDIR_SQ='$(DESTDIR_SQ)' gitexec_instdir_SQ='$(gitexec_instdir_SQ)' install && ) true
+endif
 ifneq (,$X)
 	$(foreach p,$(patsubst %$X,%,$(filter %$X,$(ALL_COMMANDS_TO_INSTALL) git$X)), test '$(DESTDIR_SQ)$(gitexec_instdir_SQ)/$p' -ef '$(DESTDIR_SQ)$(gitexec_instdir_SQ)/$p$X' || $(RM) '$(DESTDIR_SQ)$(gitexec_instdir_SQ)/$p';)
 endif
@@ -3173,6 +3195,9 @@ endif
 ifndef NO_TCLTK
 	$(MAKE) -C gitk-git clean
 	$(MAKE) -C git-gui clean
+endif
+ifneq ($(FILTER_PROFILES),)
+	$(foreach PF,$(FILTER_PROFILES),$(MAKE) -C $(PF) clean && ) true
 endif
 	$(RM) GIT-VERSION-FILE GIT-CFLAGS GIT-LDFLAGS GIT-BUILD-OPTIONS
 	$(RM) GIT-USER-AGENT GIT-PREFIX
