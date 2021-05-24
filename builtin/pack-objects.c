@@ -84,6 +84,7 @@ static const char *base_name;
 static int progress = 1;
 static int window = 10;
 static unsigned long pack_size_limit;
+static unsigned long small_file_threshold = 50;
 static int depth = 50;
 static int delta_search_threads;
 static int pack_to_stdout;
@@ -2129,9 +2130,14 @@ static void get_object_details(void)
 	for (i = 0; i < to_pack.nr_objects; i++) {
 		struct object_entry *entry = sorted_by_offset[i];
 		check_object(entry, i);
-		if (entry->type_valid &&
-		    oe_size_greater_than(&to_pack, entry, big_file_threshold))
-			entry->no_try_delta = 1;
+
+		if (entry->type_valid) {
+			if (entry->type_ == OBJ_BLOB && oe_size_less_than(&to_pack, entry, small_file_threshold))
+				entry->no_try_delta = 1;
+			else if (oe_size_greater_than(&to_pack, entry, big_file_threshold))
+				entry->no_try_delta = 1;
+		}
+
 		display_progress(progress_state, i + 1);
 	}
 	stop_progress(&progress_state);
@@ -2885,7 +2891,7 @@ static void prepare_pack(int window, int depth)
 			continue;
 
 		if (!entry->type_valid ||
-		    oe_size_less_than(&to_pack, entry, 50))
+		    oe_size_less_than(&to_pack, entry, small_file_threshold))
 			continue;
 
 		if (entry->no_try_delta)
@@ -2936,6 +2942,10 @@ static int git_pack_config(const char *k, const char *v, void *cb)
 	}
 	if (!strcmp(k, "pack.depth")) {
 		depth = git_config_int(k, v);
+		return 0;
+	}
+	if (!strcmp(k, "pack.smallfilethreshold")) {
+		small_file_threshold = git_config_int(k, v);
 		return 0;
 	}
 	if (!strcmp(k, "pack.deltacachesize")) {
