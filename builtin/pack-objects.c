@@ -99,6 +99,7 @@ static struct bitmap *reuse_packfile_bitmap;
 static int use_bitmap_index_default = 1;
 static int use_bitmap_index = -1;
 static int allow_pack_reuse = 1;
+static int allow_blob_deltas = 1;
 static enum {
 	WRITE_BITMAP_FALSE = 0,
 	WRITE_BITMAP_QUIET,
@@ -2129,9 +2130,14 @@ static void get_object_details(void)
 	for (i = 0; i < to_pack.nr_objects; i++) {
 		struct object_entry *entry = sorted_by_offset[i];
 		check_object(entry, i);
-		if (entry->type_valid &&
-		    oe_size_greater_than(&to_pack, entry, big_file_threshold))
-			entry->no_try_delta = 1;
+
+		if (entry->type_valid) {
+			if (entry->type_ == OBJ_BLOB && !allow_blob_deltas)
+				entry->no_try_delta = 1;
+			else if (oe_size_greater_than(&to_pack, entry, big_file_threshold))
+				entry->no_try_delta = 1;
+		}
+
 		display_progress(progress_state, i + 1);
 	}
 	stop_progress(&progress_state);
@@ -2936,6 +2942,10 @@ static int git_pack_config(const char *k, const char *v, void *cb)
 	}
 	if (!strcmp(k, "pack.depth")) {
 		depth = git_config_int(k, v);
+		return 0;
+	}
+	if (!strcmp(k, "pack.allowblobdeltas")) {
+		allow_blob_deltas = git_config_bool(k, v);
 		return 0;
 	}
 	if (!strcmp(k, "pack.deltacachesize")) {
