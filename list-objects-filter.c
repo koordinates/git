@@ -10,6 +10,7 @@
 #include "list-objects.h"
 #include "list-objects-filter.h"
 #include "list-objects-filter-options.h"
+#include "list-objects-filter-profile.h"
 #include "oidmap.h"
 #include "oidset.h"
 #include "object-store.h"
@@ -620,6 +621,98 @@ static void filter_object_type__init(
 	filter->free_fn = free;
 }
 
+/*
+ * A filter which passes the objects to a compile-time plugin.
+ * The plugin needs to implement the filter_profile_plugin interface
+ * defined in list-objects-filter.h.
+ */
+
+#ifndef FILTER_PROFILE_PLUGINS
+#define FILTER_PROFILE_PLUGINS
+#endif
+
+static const struct filter_profile_plugin
+	*filter_profile_plugins[] = {
+		FILTER_PROFILE_PLUGINS
+	};
+
+struct filter_profile_data {
+	const struct filter_profile_plugin *plugin;
+	void *context;
+};
+
+static enum list_objects_filter_result filter_profile_filter_object(
+	struct repository *r,
+	enum list_objects_filter_situation filter_situation,
+	struct object *obj,
+	const char *pathname,
+	const char *filename,
+	struct oidset *omits,
+	void *filter_data_)
+{
+	struct filter_profile_data *filter_data = filter_data_;
+
+	enum list_objects_filter_omit omit_it = LOFO_IGNORE;
+
+	enum list_objects_filter_result ret =
+		filter_data->plugin->filter_object_fn(
+			r,
+			filter_situation,
+			obj,
+			pathname,
+			filename,
+			&omit_it,
+			&filter_data->context);
+
+	if (omits) {
+		if (omit_it == LOFO_KEEP)
+			oidset_remove(omits, &obj->oid);
+		else if (omit_it == LOFO_OMIT)
+			oidset_insert(omits, &obj->oid);
+	}
+	return ret;
+}
+
+static void filter_profile_free(void *filter_data)
+{
+	struct filter_profile_data *d = filter_data;
+	d->plugin->free_fn(the_repository, &d->context);
+	free(d);
+}
+
+static void filter_profile__init(
+	struct list_objects_filter_options *filter_options,
+	struct filter *filter)
+{
+	struct filter_profile_data *d = xcalloc(1, sizeof(*d));
+	int num_filter_profile_plugins = sizeof(filter_profile_plugins) /
+		sizeof(struct filter_profile_plugin*);
+	int i, r;
+
+	for (i = 0; i < num_filter_profile_plugins; i++) {
+		if (!strcmp(
+			filter_options->profile_name,
+			filter_profile_plugins[i]->name))
+			break;
+	}
+	if (i >= num_filter_profile_plugins) {
+		die(_("No filter profile plugin found with name %s"),
+			filter_options->profile_name);
+	}
+	d->plugin = filter_profile_plugins[i];
+
+	r = d->plugin->init_fn(
+		the_repository, filter_options->profile_value, &d->context);
+	if (r) {
+		die(_("Error initialising filter profile %s: %d"),
+			filter_options->profile_name, r);
+	}
+
+	filter->filter_data = d;
+	filter->filter_object_fn = &filter_profile_filter_object;
+	filter->free_fn = &filter_profile_free;
+}
+
 /* A filter which only shows objects shown by all sub-filters. */
 struct combine_filter_data {
 	struct subfilter *sub;
@@ -767,6 +860,7 @@ static filter_init_fn s_filters[] = {
 	filter_trees_depth__init,
 	filter_sparse_oid__init,
 	filter_object_type__init,
+	filter_profile__init,
 	filter_combine__init,
 };
 
