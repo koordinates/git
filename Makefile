@@ -1955,6 +1955,25 @@ ifndef PAGER_ENV
 PAGER_ENV = LESS=FRX LV=-c
 endif
 
+ifneq ($(FILTER_PLUGINS),)
+FILTER_LIBS = $(subst :, ,$(FILTER_PLUGINS))
+FILTER_LIB_PATHS = $(dir FILTER_LIBS)
+$(FILTER_LIBS): $(FILTER_LIB_PATHS)
+	$(MAKE) -C $(@D) \
+		ALL_CFLAGS='$(subst ','\'',$(ALL_CFLAGS))' \
+		ALL_LDFLAGS='$(subst ','\'',$(ALL_LDFLAGS))' \
+		PROFILE_DIR='$(subst ','\'',$(PROFILE_DIR))' \
+		all
+
+EXTLIBS += $(FILTER_LIBS)
+
+FILTER_NAMES = $(basename $(notdir $(FILTER_LIBS)))
+C_FILTER_PLUGINS = $(patsubst %,filter_profile_plugin_%,$(FILTER_NAMES))
+C_FILTER_PLUGIN_PTRS = $(patsubst %,\&%,$(C_FILTER_PLUGINS))
+BASIC_CFLAGS += -DFILTER_PLUGINS=$(C_FILTER_PLUGINS)
+BASIC_CFLAGS += -DFILTER_PLUGIN_PTRS=$(C_FILTER_PLUGIN_PTRS)
+endif
+
 QUIET_SUBDIR0  = +$(MAKE) -C # space to separate -C and subdir
 QUIET_SUBDIR1  =
 
@@ -2612,6 +2631,7 @@ $(LIB_FILE): $(LIB_OBJS)
 $(XDIFF_LIB): $(XDIFF_OBJS)
 	$(QUIET_AR)$(AR) $(ARFLAGS) $@ $^
 
+
 export DEFAULT_EDITOR DEFAULT_PAGER
 
 Documentation/GIT-EXCLUDED-PROGRAMS: FORCE
@@ -3256,6 +3276,9 @@ endif
 ifndef NO_TCLTK
 	$(MAKE) -C gitk-git clean
 	$(MAKE) -C git-gui clean
+endif
+ifneq ($(FILTER_PLUGINS),)
+	$(foreach FP,$(FILTER_PLUGINS),$(MAKE) -C $(FP) clean && ) true
 endif
 	$(RM) GIT-VERSION-FILE GIT-CFLAGS GIT-LDFLAGS GIT-BUILD-OPTIONS
 	$(RM) GIT-USER-AGENT GIT-PREFIX

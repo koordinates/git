@@ -627,13 +627,17 @@ static void filter_object_type__init(
  * defined in list-objects-filter.h.
  */
 
-#ifndef FILTER_PROFILE_PLUGINS
-#define FILTER_PROFILE_PLUGINS
+#ifdef FILTER_PLUGINS
+extern const struct filter_profile_plugin FILTER_PLUGINS ;
 #endif
 
 static const struct filter_profile_plugin
 	*filter_profile_plugins[] = {
-		FILTER_PROFILE_PLUGINS
+
+#ifdef FILTER_PLUGIN_PTRS
+FILTER_PLUGIN_PTRS
+#endif
+
 	};
 
 struct filter_profile_data {
