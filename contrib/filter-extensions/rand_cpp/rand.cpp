@@ -9,12 +9,14 @@ extern "C" {
 	#include "adapter_functions.h"
 }
 
+namespace {
+
 struct rand_context {
 	int percentageMatch = 0;
 	int matchCount = 0;
 	int blobCount = 0;
 	int treeCount = 0;
-	struct timespec started_at;
+	uint64_t started_at = 0;
 };
 
 static int rand_init(
@@ -30,8 +32,7 @@ static int rand_init(
 		ctx->percentageMatch = 1;  // default 1%
 	}
 	std::cerr << "filter-rand-cpp: matching " << ctx->percentageMatch << "%\n";
-	clock_gettime(CLOCK_MONOTONIC, &ctx->started_at);
-	(*context) = ctx;
+	ctx->started_at = getnanotime();
 
 	return 0;
 }
@@ -79,13 +80,8 @@ enum list_objects_filter_result rand_filter_object(
 
 void rand_free(const struct repository *r, void *context) {
 	struct rand_context *ctx = static_cast<struct rand_context*>(context);
-
-	struct timespec ended_at;
-	clock_gettime(CLOCK_MONOTONIC, &ended_at);
-
+	double elapsed = (getnanotime() - ctx->started_at)/1E9;
 	int count = ctx->blobCount + ctx->treeCount;
-	double elapsed = (ended_at.tv_sec - ctx->started_at.tv_sec)
-		+ (ended_at.tv_nsec - ctx->started_at.tv_nsec)/1E9;
 
 	std::cerr << "filter-rand-cpp: done: count=" << count
 		<< " (blob=" << ctx->blobCount << " tree=" << ctx->treeCount << ")"
@@ -96,6 +92,8 @@ void rand_free(const struct repository *r, void *context) {
 
 	delete ctx;
 }
+
+} // namespace
 
 extern const struct filter_extension filter_extension_rand_cpp = {
 	"rand_cpp",

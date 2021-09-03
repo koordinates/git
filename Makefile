@@ -471,6 +471,11 @@ all::
 # directory, and the JSON compilation database 'compile_commands.json' will be
 # created at the root of the repository.
 #
+# Define FILTER_EXTENSIONS to a space-separated list of static library plugins
+# that implement the filter-object-list extension API. Each of this filter
+# extensions will then be available in addition to the builtin ones such as
+# "blob:limit" and "object:type". See contrib/filter-extensions/README.txt
+#
 # Define DEVELOPER to enable more compiler warnings. Compiler version
 # and family are auto detected, but could be overridden by defining
 # COMPILER_FEATURES (see config.mak.dev). You can still set
@@ -1199,7 +1204,6 @@ THIRD_PARTY_SOURCES += sha1dc/%
 
 GITLIBS = common-main.o $(LIB_FILE) $(XDIFF_LIB)
 EXTLIBS =
-
 
 GIT_USER_AGENT = git/$(GIT_VERSION)
 
@@ -1958,20 +1962,6 @@ ifndef PAGER_ENV
 PAGER_ENV = LESS=FRX LV=-c
 endif
 
-ifneq ($(FILTER_EXTENSIONS),)
-FILTER_EXT_PATHS = $(dir $(FILTER_EXTENSIONS))
-
-$(FILTER_EXTENSIONS): $(FILTER_EXT_PATHS)
-	$(MAKE) -C $(@D) \
-		ALL_CFLAGS='$(subst ','\'',$(ALL_CFLAGS))' \
-		ALL_LDFLAGS='$(subst ','\'',$(ALL_LDFLAGS))' \
-		PROFILE_DIR='$(subst ','\'',$(PROFILE_DIR))' \
-		$(@F)
-
-GITLIBS += $(FILTER_EXTENSIONS)
-EXTLIBS += $(FILTER_EXTENSION_LIBS)
-endif
-
 QUIET_SUBDIR0  = +$(MAKE) -C # space to separate -C and subdir
 QUIET_SUBDIR1  =
 
@@ -2131,6 +2121,19 @@ GIT-USER-AGENT: FORCE
 
 ifdef DEFAULT_HELP_FORMAT
 BASIC_CFLAGS += -DDEFAULT_HELP_FORMAT='"$(DEFAULT_HELP_FORMAT)"'
+endif
+
+ifneq ($(FILTER_EXTENSIONS),)
+FILTER_EXT_PATHS = $(dir $(FILTER_EXTENSIONS))
+
+$(FILTER_EXTENSIONS): $(FILTER_EXT_PATHS)
+	$(QUIET_SUBDIR0)$(@D) $(QUIET_SUBDIR1) \
+		ALL_CFLAGS='$(subst ','\'',$(ALL_CFLAGS))' \
+		ALL_LDFLAGS='$(subst ','\'',$(ALL_LDFLAGS))' \
+		PROFILE_DIR='$(subst ','\'',$(PROFILE_DIR))' \
+		$(@F)
+
+GITLIBS += $(FILTER_EXTENSIONS)
 endif
 
 PAGER_ENV_SQ = $(subst ','\'',$(PAGER_ENV))

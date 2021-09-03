@@ -12,7 +12,7 @@ struct rand_context {
 	int matchCount;
 	int blobCount;
 	int treeCount;
-	struct timespec started_at;
+	uint64_t started_at;
 };
 
 static int rand_init(
@@ -29,7 +29,7 @@ static int rand_init(
 	ctx->percentageMatch = 1;  // default 1%
 	}
 	fprintf(stderr, "filter-rand: matching %d%%\n", ctx->percentageMatch);
-	clock_gettime(CLOCK_MONOTONIC, &ctx->started_at);
+	ctx->started_at = getnanotime();
 	(*context) = ctx;
 
 	return 0;
@@ -53,10 +53,7 @@ static enum list_objects_filter_result rand_filter_object(
 
 	switch (filter_situation) {
 	default:
-		fprintf(stderr,
-			"filter-rand: unknown filter_situation: %d\n",
-			filter_situation);
-		abort();
+		die("filter-rand: unknown filter_situation: %d", filter_situation);
 
 	case LOFS_BEGIN_TREE:
 		ctx->treeCount++;
@@ -87,13 +84,8 @@ static enum list_objects_filter_result rand_filter_object(
 static void rand_free(const struct repository *r, void *context)
 {
 	struct rand_context *ctx = (struct rand_context*)(context);
-
-	struct timespec ended_at;
-	clock_gettime(CLOCK_MONOTONIC, &ended_at);
-
+	double elapsed = (getnanotime() - ctx->started_at)/1E9;
 	int count = ctx->blobCount + ctx->treeCount;
-	double elapsed = (ended_at.tv_sec - ctx->started_at.tv_sec)
-		+ (ended_at.tv_nsec - ctx->started_at.tv_nsec)/1E9;
 
 	fprintf(stderr, "filter-rand: done: count=%d (blob=%d tree=%d) "
 		"matched=%d elapsed=%fs rate=%0.1f/s average=%0.1fus\n",
