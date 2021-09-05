@@ -484,6 +484,13 @@ include shared.mak
 # Define LIBPCREDIR=/foo/bar if your PCRE header and library files are
 # in /foo/bar/include and /foo/bar/lib directories.
 #
+# === Optional: Filter extensions ===
+#
+# Define FILTER_EXTENSIONS to a space-separated list of static library plugins
+# that implement the filter-object-list extension API. Each of this filter
+# extensions will then be available in addition to the builtin ones such as
+# "blob:limit" and "object:type". See contrib/filter-extensions/README.txt
+#
 # == SHA-1 and SHA-256 defines ==
 #
 # === SHA-1 backend ===
@@ -673,6 +680,7 @@ BUILT_INS =
 COMPAT_CFLAGS =
 COMPAT_OBJS =
 XDIFF_OBJS =
+GENERATED_C =
 GENERATED_H =
 EXTRA_CPPFLAGS =
 FUZZ_OBJS =
@@ -921,9 +929,10 @@ GENERATED_H += config-list.h
 GENERATED_H += hook-list.h
 GENERATED_H += $(UNIT_TEST_DIR)/clar-decls.h
 GENERATED_H += $(UNIT_TEST_DIR)/clar.suite
+GENERATED_C += list-objects-filter-extensions.c
 
 .PHONY: generated-hdrs
-generated-hdrs: $(GENERATED_H)
+generated-hdrs: $(GENERATED_H) $(GENERATED_C)
 
 ## Exhaustive lists of our source files, either dynamically generated,
 ## or hardcoded.
@@ -1047,6 +1056,7 @@ LIB_OBJS += levenshtein.o
 LIB_OBJS += line-log.o
 LIB_OBJS += line-range.o
 LIB_OBJS += linear-assignment.o
+LIB_OBJS += list-objects-filter-extensions.o
 LIB_OBJS += list-objects-filter-options.o
 LIB_OBJS += list-objects-filter.o
 LIB_OBJS += list-objects.o
@@ -2372,6 +2382,20 @@ ifdef DEFAULT_HELP_FORMAT
 BASIC_CFLAGS += -DDEFAULT_HELP_FORMAT='"$(DEFAULT_HELP_FORMAT)"'
 endif
 
+ifneq ($(FILTER_EXTENSIONS),)
+FILTER_EXT_PATHS = $(dir $(FILTER_EXTENSIONS))
+
+$(FILTER_EXTENSIONS): $(FILTER_EXT_PATHS)
+	$(QUIET_SUBDIR0)$(@D) $(QUIET_SUBDIR1) \
+		ALL_CFLAGS='$(subst ','\'',$(ALL_CFLAGS))' \
+		ALL_LDFLAGS='$(subst ','\'',$(ALL_LDFLAGS))' \
+		PROFILE_DIR='$(subst ','\'',$(PROFILE_DIR))' \
+		$(@F)
+
+GITLIBS += $(FILTER_EXTENSIONS)
+EXTLIBS += $(EXTENSION_LIBS)
+endif
+
 ALL_CFLAGS += $(BASIC_CFLAGS)
 ALL_LDFLAGS += $(BASIC_LDFLAGS)
 
@@ -2533,6 +2557,10 @@ command-list.h: $(wildcard Documentation/git*.txt)
 
 hook-list.h: generate-hooklist.sh Documentation/githooks.txt
 	$(QUIET_GEN)$(SHELL_PATH) ./generate-hooklist.sh >$@
+
+list-objects-filter-extensions.c: generate-list-objects-filter-extensions.sh GIT-BUILD-OPTIONS
+	$(QUIET_GEN)$(SHELL_PATH) ./generate-list-objects-filter-extensions.sh \
+		$(FILTER_EXTENSIONS) > $@+ && mv $@+ $@
 
 SCRIPT_DEFINES = $(SHELL_PATH_SQ):$(DIFF_SQ):\
 	$(localedir_SQ):$(USE_GETTEXT_SCHEME):$(SANE_TOOL_PATH_SQ):\
@@ -2805,7 +2833,7 @@ ifneq ($(dep_files_present),)
 include $(dep_files_present)
 endif
 else
-$(OBJECTS): $(LIB_H) $(GENERATED_H)
+$(OBJECTS): $(LIB_H) $(GENERATED_H) $(GENERATED_C)
 endif
 
 ifeq ($(GENERATE_COMPILATION_DATABASE),yes)
@@ -2942,7 +2970,7 @@ XGETTEXT_FLAGS_SH = $(XGETTEXT_FLAGS) --language=Shell \
 XGETTEXT_FLAGS_PERL = $(XGETTEXT_FLAGS) --language=Perl \
 	--keyword=__ --keyword=N__ --keyword="__n:1,2"
 MSGMERGE_FLAGS = --add-location --backup=off --update
-LOCALIZED_C = $(sort $(FOUND_C_SOURCES) $(FOUND_H_SOURCES) $(GENERATED_H))
+LOCALIZED_C = $(sort $(FOUND_C_SOURCES) $(FOUND_H_SOURCES) $(GENERATED_H) ${GENERATED_C})
 LOCALIZED_SH = $(sort $(SCRIPT_SH) git-sh-setup.sh)
 LOCALIZED_PERL = $(sort $(SCRIPT_PERL))
 
@@ -3233,6 +3261,9 @@ ifdef RUNTIME_PREFIX
 	@echo RUNTIME_PREFIX=\'true\' >>$@+
 else
 	@echo RUNTIME_PREFIX=\'false\' >>$@+
+endif
+ifdef FILTER_EXTENSIONS
+	@echo FILTER_EXTENSIONS=\''$(subst ','\'',$(subst ','\'',$(FILTER_EXTENSIONS)))'\' >>$@+
 endif
 	@if cmp $@+ $@ >/dev/null 2>&1; then $(RM) $@+; else mv $@+ $@; fi
 	@if test -f GIT-BUILD-DIR; then rm GIT-BUILD-DIR; fi
@@ -3752,7 +3783,7 @@ clean: profile-clean coverage-clean cocciclean
 	$(RM) $(HCC)
 	$(RM) -r bin-wrappers $(dep_dirs) $(compdb_dir) compile_commands.json
 	$(RM) -r po/build/
-	$(RM) *.pyc *.pyo */*.pyc */*.pyo $(GENERATED_H) $(ETAGS_TARGET) tags cscope*
+	$(RM) *.pyc *.pyo */*.pyc */*.pyo $(GENERATED_H) $(GENERATED_C) $(ETAGS_TARGET) tags cscope*
 	$(RM) -r .dist-tmp-dir .doc-tmp-dir
 	$(RM) $(GIT_TARNAME).tar.gz
 	$(RM) $(htmldocs).tar.gz $(manpages).tar.gz
@@ -3766,6 +3797,9 @@ endif
 ifndef NO_TCLTK
 	$(MAKE) -C gitk-git clean
 	$(MAKE) -C git-gui clean
+endif
+ifneq ($(FILTER_EXTENSIONS),)
+	$(foreach FP,$(FILTER_EXTENSIONS),$(MAKE) -C $(dir $(FP)) clean && ) true
 endif
 	$(RM) GIT-VERSION-FILE GIT-CFLAGS GIT-LDFLAGS GIT-BUILD-OPTIONS
 	$(RM) GIT-USER-AGENT GIT-PREFIX
