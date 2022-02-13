@@ -715,8 +715,8 @@ static int fetch(struct transport *transport,
 	if (data->transport_options.update_shallow)
 		set_helper_option(transport, "update-shallow", "true");
 
-	if (data->transport_options.refilter)
-		set_helper_option(transport, "refilter", "true");
+	if (data->transport_options.repair)
+		set_helper_option(transport, "repair", "true");
 
 	if (data->transport_options.filter_options.choice) {
 		const char *spec = expand_list_objects_filter_spec(

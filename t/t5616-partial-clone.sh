@@ -184,23 +184,23 @@ test_expect_success 'push new commits to server for file.4.txt' '
 	git -C src push -u srv main
 '
 
-# Do partial fetch to fetch smaller files; then verify that without --refilter
+# Do partial fetch to fetch smaller files; then verify that without --repair
 # applying a new filter does not refetch missing large objects. Then use
-# --refilter to apply the new filter on existing commits. Test it under both
+# --repair to apply the new filter on existing commits. Test it under both
 # protocol v2 & v0.
-test_expect_success 'apply a different filter using --refilter' '
+test_expect_success 'apply a different filter using --repair' '
 	git -C pc1 fetch --filter=blob:limit=999 origin &&
 	git -C pc1 rev-list --quiet --objects --missing=print \
 		main..origin/main >observed &&
 	test_line_count = 4 observed &&
 
-	git -C pc1 fetch --filter=blob:limit=19999 --refilter origin &&
+	git -C pc1 fetch --filter=blob:limit=19999 --repair origin &&
 	git -C pc1 rev-list --quiet --objects --missing=print \
 		main..origin/main >observed &&
 	test_line_count = 2 observed &&
 
 	git -c protocol.version=0 -C pc1 fetch --filter=blob:limit=29999 \
-		--refilter origin &&
+		--repair origin &&
 	git -C pc1 rev-list --quiet --objects --missing=print \
 		main..origin/main >observed &&
 	test_line_count = 0 observed

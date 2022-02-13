@@ -153,8 +153,8 @@ int cmd_fetch_pack(int argc, const char **argv, const char *prefix)
 			args.from_promisor = 1;
 			continue;
 		}
-		if (!strcmp("--refilter", arg)) {
-			args.refilter = 1;
+		if (!strcmp("--repair", arg)) {
+			args.repair = 1;
 			continue;
 		}
 		if (skip_prefix(arg, ("--" CL_ARG__FILTER "="), &arg)) {

@@ -163,12 +163,13 @@ endif::git-pull[]
 	setting. See linkgit:git-config[1].
 
 ifndef::git-pull[]
---refilter::
-	Reapply a partial clone filter from configuration or `--filter=`, such
-	as when the filter definition has changed. Instead of negotiating with
-	the server to avoid transferring commits and associated objects that are
-	already present locally, this option fetches all objects that match the
-	filter.
+--repair::
+	Fetch all objects that match the filter, regardless of current state.
+	Can be used to reapply a partial clone filter from configuration or
+	`--filter=`, such as when the filter definition has changed. Instead of
+	negotiating with the server to avoid transferring commits and associated
+	objects that are already present locally, this option fetches all objects
+	that match the filter.
 endif::git-pull[]
 
 --refmap=<refspec>::

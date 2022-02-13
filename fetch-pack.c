@@ -306,7 +306,7 @@ static int find_common(struct fetch_negotiator *negotiator,
 		const char *remote_hex;
 		struct object *o;
 
-		if (!args->refilter) {
+		if (!args->repair) {
 			/*
 			* If that object is complete (i.e. it is an ancestor of a
 			* local ref), we tell them we have it but do not have to
@@ -690,7 +690,7 @@ static void mark_complete_and_common_ref(struct fetch_negotiator *negotiator,
 
 	save_commit_buffer = 0;
 
-	if (args->refilter)
+	if (args->repair)
 		return;
 
 	trace2_region_enter("fetch-pack", "parse_remote_refs_and_find_cutoff", NULL);
@@ -1017,7 +1017,7 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 	int agent_len;
 	struct fetch_negotiator negotiator_alloc;
 	struct fetch_negotiator *negotiator;
-	unsigned is_refiltering = 0;
+	unsigned is_repairing = 0;
 
 	sort_ref_list(&ref, ref_compare_name);
 	QSORT(sought, nr_sought, cmp_ref_by_name);
@@ -1087,12 +1087,12 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 	if (server_supports("filter")) {
 		server_supports_filtering = 1;
 		print_verbose(args, _("Server supports %s"), "filter");
-	} else if (args->filter_options.choice || args->refilter) {
+	} else if (args->filter_options.choice || args->repair) {
 		warning("filtering not recognized by server, ignoring");
 	}
 
-	if (server_supports_filtering && args->refilter) {
-		is_refiltering = 1;
+	if (server_supports_filtering && args->repair) {
+		is_repairing = 1;
 	}
 
 	if (server_supports("deepen-since")) {
@@ -1113,7 +1113,7 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 		die(_("Server does not support this repository's object format"));
 
 	negotiator = &negotiator_alloc;
-	if (is_refiltering) {
+	if (is_repairing) {
 		fetch_negotiator_init_noop(negotiator);
 	} else {
 		fetch_negotiator_init(r, negotiator);
@@ -1121,7 +1121,7 @@ static struct ref *do_fetch_pack(struct fetch_pack_args *args,
 
 	mark_complete_and_common_ref(negotiator, args, &ref);
 	filter_refs(args, &ref, sought, nr_sought);
-	if (!is_refiltering && everything_local(args, &ref)) {
+	if (!is_repairing && everything_local(args, &ref)) {
 		packet_flush(fd[1]);
 		goto all_done;
 	}
@@ -1579,7 +1579,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	struct strvec index_pack_args = STRVEC_INIT;
 
 	negotiator = &negotiator_alloc;
-	if (args->refilter)
+	if (args->repair)
 		fetch_negotiator_init_noop(negotiator);
 	else
 		fetch_negotiator_init(r, negotiator);
@@ -1608,7 +1608,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 			/* Filter 'ref' by 'sought' and those that aren't local */
 			mark_complete_and_common_ref(negotiator, args, &ref);
 			filter_refs(args, &ref, sought, nr_sought);
-			if (!args->refilter && everything_local(args, &ref))
+			if (!args->repair && everything_local(args, &ref))
 				state = FETCH_DONE;
 			else
 				state = FETCH_SEND_REQUEST;
