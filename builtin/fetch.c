@@ -58,7 +58,7 @@ static int prune_tags = -1; /* unspecified */
 
 static int all, append, dry_run, force, keep, multiple, update_head_ok;
 static int write_fetch_head = 1;
-static int verbosity, deepen_relative, set_upstream, refilter;
+static int verbosity, deepen_relative, set_upstream, repair;
 static int progress = -1;
 static int enable_auto_gc = 1;
 static int tags = TAGS_DEFAULT, unshallow, update_shallow, deepen;
@@ -188,7 +188,7 @@ static struct option builtin_fetch_options[] = {
 	OPT_SET_INT_F(0, "unshallow", &unshallow,
 		      N_("convert to a complete repository"),
 		      1, PARSE_OPT_NONEG),
-	OPT_SET_INT_F(0, "refilter", &refilter,
+	OPT_SET_INT_F(0, "repair", &repair,
 		      N_("re-fetch with a modified filter"),
 		      1, PARSE_OPT_NONEG),
 	{ OPTION_STRING, 0, "submodule-prefix", &submodule_prefix, N_("dir"),
@@ -1288,13 +1288,13 @@ static int check_exist_and_connected(struct ref *ref_map)
 		return -1;
 
 	/*
-	 * Similarly, if we need to refilter a partial clone we already have
+	 * Similarly, if we need to repair a partial clone we already have
 	 * these commits reachable.  Running rev-list here will return with
 	 * a good (0) exit status and we'll bypass the fetch that we
 	 * really need to perform.  Claiming failure now will ensure
 	 * we perform the network exchange to reapply the filter.
 	 */
-	if (refilter)
+	if (repair)
 		return -1;
 
 
@@ -1493,8 +1493,8 @@ static struct transport *prepare_transport(struct remote *remote, int deepen)
 		set_option(transport, TRANS_OPT_DEEPEN_RELATIVE, "yes");
 	if (update_shallow)
 		set_option(transport, TRANS_OPT_UPDATE_SHALLOW, "yes");
-	if (refilter)
-		set_option(transport, TRANS_OPT_REFILTER, "yes");
+	if (repair)
+		set_option(transport, TRANS_OPT_REPAIR, "yes");
 	if (filter_options.choice) {
 		const char *spec =
 			expand_list_objects_filter_spec(&filter_options);
