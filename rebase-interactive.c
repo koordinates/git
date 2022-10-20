@@ -54,9 +54,12 @@ void append_todo_help(int command_count,
 "l, label <label> = label current HEAD with a name\n"
 "t, reset <label> = reset HEAD to a label\n"
 "m, merge [-C <commit> | -c <commit>] <label> [# <oneline>]\n"
-".       create a merge commit using the original merge commit's\n"
-".       message (or the oneline, if no original merge commit was\n"
-".       specified); use -c <commit> to reword the commit message\n"
+"        create a merge commit using the original merge commit's\n"
+"        message (or the oneline, if no original merge commit was\n"
+"        specified); use -c <commit> to reword the commit message\n"
+"u, update-ref <ref> = track a placeholder for the <ref> to be updated\n"
+"                      to this position in the new commits. The <ref> is\n"
+"                      updated at the end of the rebase\n"
 "\n"
 "These lines can be re-ordered; they are executed from top to bottom.\n");
 	unsigned edit_todo = !(shortrevisions && shortonto);
@@ -143,6 +146,12 @@ int edit_todo_list(struct repository *r, struct todo_list *todo_list,
 		return -4;
 	}
 
+	/*
+	 * See if branches need to be added or removed from the update-refs
+	 * file based on the new todo list.
+	 */
+	todo_list_filter_update_refs(r, new_todo);
+
 	return 0;
 }
 
@@ -224,34 +233,5 @@ int todo_list_check_against_backup(struct repository *r, struct todo_list *todo_
 	}
 
 	todo_list_release(&backup);
-	return res;
-}
-
-int check_todo_list_from_file(struct repository *r)
-{
-	struct todo_list old_todo = TODO_LIST_INIT, new_todo = TODO_LIST_INIT;
-	int res = 0;
-
-	if (strbuf_read_file(&new_todo.buf, rebase_path_todo(), 0) < 0) {
-		res = error(_("could not read '%s'."), rebase_path_todo());
-		goto out;
-	}
-
-	if (strbuf_read_file(&old_todo.buf, rebase_path_todo_backup(), 0) < 0) {
-		res = error(_("could not read '%s'."), rebase_path_todo_backup());
-		goto out;
-	}
-
-	res = todo_list_parse_insn_buffer(r, old_todo.buf.buf, &old_todo);
-	if (!res)
-		res = todo_list_parse_insn_buffer(r, new_todo.buf.buf, &new_todo);
-	if (res)
-		fprintf(stderr, _(edit_todo_list_advice));
-	if (!res)
-		res = todo_list_check(&old_todo, &new_todo);
-out:
-	todo_list_release(&old_todo);
-	todo_list_release(&new_todo);
-
 	return res;
 }

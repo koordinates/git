@@ -22,7 +22,7 @@
  *
  *   - pack position refers to an object's position within a non-existent pack
  *     described by the MIDX. The pack structure is described in
- *     Documentation/technical/pack-format.txt.
+ *     gitformat-pack(5).
  *
  *     It is effectively a concatanation of all packs in the MIDX (ordered by
  *     their numeric ID within the MIDX) in their original order within each
@@ -109,7 +109,7 @@ off_t pack_pos_to_offset(struct packed_git *p, uint32_t pos);
  * If the reverse index has not yet been loaded, or the position is out of
  * bounds, this function aborts.
  *
- * This function runs in time O(log N) with the number of objects in the MIDX.
+ * This function runs in constant time.
  */
 uint32_t pack_pos_to_midx(struct multi_pack_index *m, uint32_t pos);
 
@@ -120,7 +120,7 @@ uint32_t pack_pos_to_midx(struct multi_pack_index *m, uint32_t pos);
  * If the reverse index has not yet been loaded, or the position is out of
  * bounds, this function aborts.
  *
- * This function runs in constant time.
+ * This function runs in time O(log N) with the number of objects in the MIDX.
  */
 int midx_to_pack_pos(struct multi_pack_index *midx, uint32_t at, uint32_t *pos);
 

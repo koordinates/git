@@ -39,8 +39,6 @@ static const char * const builtin_bundle_unbundle_usage[] = {
   NULL
 };
 
-static int verbose;
-
 static int parse_options_cmd_bundle(int argc,
 		const char **argv,
 		const char* prefix,
@@ -95,6 +93,7 @@ static int cmd_bundle_create(int argc, const char **argv, const char *prefix) {
 	if (!startup_info->have_repository)
 		die(_("Need a repository to create a bundle."));
 	ret = !!create_bundle(the_repository, bundle_file, argc, argv, &pack_opts, version);
+	strvec_clear(&pack_opts);
 	free(bundle_file);
 	return ret;
 }
@@ -162,10 +161,15 @@ static int cmd_bundle_unbundle(int argc, const char **argv, const char *prefix) 
 	struct bundle_header header = BUNDLE_HEADER_INIT;
 	int bundle_fd = -1;
 	int ret;
+	int progress = isatty(2);
+
 	struct option options[] = {
+		OPT_BOOL(0, "progress", &progress,
+			 N_("show progress meter")),
 		OPT_END()
 	};
 	char *bundle_file;
+	struct strvec extra_index_pack_args = STRVEC_INIT;
 
 	argc = parse_options_cmd_bundle(argc, argv, prefix,
 			builtin_bundle_unbundle_usage, options, &bundle_file);
@@ -177,7 +181,11 @@ static int cmd_bundle_unbundle(int argc, const char **argv, const char *prefix) 
 	}
 	if (!startup_info->have_repository)
 		die(_("Need a repository to unbundle."));
-	ret = !!unbundle(the_repository, &header, bundle_fd, 0) ||
+	if (progress)
+		strvec_pushl(&extra_index_pack_args, "-v", "--progress-title",
+			     _("Unbundling objects"), NULL);
+	ret = !!unbundle(the_repository, &header, bundle_fd,
+			 &extra_index_pack_args) ||
 		list_bundle_refs(&header, argc, argv);
 	bundle_header_release(&header);
 cleanup:
@@ -187,31 +195,19 @@ cleanup:
 
 int cmd_bundle(int argc, const char **argv, const char *prefix)
 {
+	parse_opt_subcommand_fn *fn = NULL;
 	struct option options[] = {
-		OPT__VERBOSE(&verbose, N_("be verbose; must be placed before a subcommand")),
+		OPT_SUBCOMMAND("create", &fn, cmd_bundle_create),
+		OPT_SUBCOMMAND("verify", &fn, cmd_bundle_verify),
+		OPT_SUBCOMMAND("list-heads", &fn, cmd_bundle_list_heads),
+		OPT_SUBCOMMAND("unbundle", &fn, cmd_bundle_unbundle),
 		OPT_END()
 	};
-	int result;
 
 	argc = parse_options(argc, argv, prefix, options, builtin_bundle_usage,
-		PARSE_OPT_STOP_AT_NON_OPTION);
+			     0);
 
 	packet_trace_identity("bundle");
 
-	if (argc < 2)
-		usage_with_options(builtin_bundle_usage, options);
-
-	else if (!strcmp(argv[0], "create"))
-		result = cmd_bundle_create(argc, argv, prefix);
-	else if (!strcmp(argv[0], "verify"))
-		result = cmd_bundle_verify(argc, argv, prefix);
-	else if (!strcmp(argv[0], "list-heads"))
-		result = cmd_bundle_list_heads(argc, argv, prefix);
-	else if (!strcmp(argv[0], "unbundle"))
-		result = cmd_bundle_unbundle(argc, argv, prefix);
-	else {
-		error(_("Unknown subcommand: %s"), argv[0]);
-		usage_with_options(builtin_bundle_usage, options);
-	}
-	return result ? 1 : 0;
+	return !!fn(argc, argv, prefix);
 }

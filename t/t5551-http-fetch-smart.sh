@@ -31,6 +31,7 @@ test_expect_success 'clone http repository' '
 	> GET /smart/repo.git/info/refs?service=git-upload-pack HTTP/1.1
 	> Accept: */*
 	> Accept-Encoding: ENCODINGS
+	> Accept-Language: ko-KR, *;q=0.9
 	> Pragma: no-cache
 	< HTTP/1.1 200 OK
 	< Pragma: no-cache
@@ -40,13 +41,15 @@ test_expect_success 'clone http repository' '
 	> Accept-Encoding: ENCODINGS
 	> Content-Type: application/x-git-upload-pack-request
 	> Accept: application/x-git-upload-pack-result
+	> Accept-Language: ko-KR, *;q=0.9
 	> Content-Length: xxx
 	< HTTP/1.1 200 OK
 	< Pragma: no-cache
 	< Cache-Control: no-cache, max-age=0, must-revalidate
 	< Content-Type: application/x-git-upload-pack-result
 	EOF
-	GIT_TRACE_CURL=true GIT_TEST_PROTOCOL_VERSION=0 \
+
+	GIT_TRACE_CURL=true GIT_TEST_PROTOCOL_VERSION=0 LANGUAGE="ko_KR.UTF-8" \
 		git clone --quiet $HTTPD_URL/smart/repo.git clone 2>err &&
 	test_cmp file clone/file &&
 	tr '\''\015'\'' Q <err |
@@ -94,7 +97,10 @@ test_expect_success 'clone http repository' '
 		test_cmp exp actual.smudged &&
 
 		grep "Accept-Encoding:.*gzip" actual >actual.gzip &&
-		test_line_count = 2 actual.gzip
+		test_line_count = 2 actual.gzip &&
+
+		grep "Accept-Language: ko-KR, *" actual >actual.language &&
+		test_line_count = 2 actual.language
 	fi
 '
 
@@ -175,8 +181,8 @@ test_expect_success 'no-op half-auth fetch does not require a password' '
 	# This is not possible with protocol v2, since both objects and refs
 	# are obtained from the "git-upload-pack" path. A solution to this is
 	# to teach the server and client to be able to inline ls-refs requests
-	# as an Extra Parameter (see pack-protocol.txt), so that "info/refs"
-	# can serve refs, just like it does in protocol v0.
+	# as an Extra Parameter (see "git help gitformat-pack-protocol"), so that
+	# "info/refs" can serve refs, just like it does in protocol v0.
 	GIT_TEST_PROTOCOL_VERSION=0 git --git-dir=half-auth fetch &&
 	expect_askpass none
 '
@@ -196,8 +202,8 @@ test_expect_success 'GIT_TRACE_CURL redacts auth details' '
 
 	# Ensure that there is no "Basic" followed by a base64 string, but that
 	# the auth details are redacted
-	! grep "Authorization: Basic [0-9a-zA-Z+/]" trace &&
-	grep "Authorization: Basic <redacted>" trace
+	! grep -i "Authorization: Basic [0-9a-zA-Z+/]" trace &&
+	grep -i "Authorization: Basic <redacted>" trace
 '
 
 test_expect_success 'GIT_CURL_VERBOSE redacts auth details' '
@@ -208,8 +214,8 @@ test_expect_success 'GIT_CURL_VERBOSE redacts auth details' '
 
 	# Ensure that there is no "Basic" followed by a base64 string, but that
 	# the auth details are redacted
-	! grep "Authorization: Basic [0-9a-zA-Z+/]" trace &&
-	grep "Authorization: Basic <redacted>" trace
+	! grep -i "Authorization: Basic [0-9a-zA-Z+/]" trace &&
+	grep -i "Authorization: Basic <redacted>" trace
 '
 
 test_expect_success 'GIT_TRACE_CURL does not redact auth details if GIT_TRACE_REDACT=0' '
@@ -219,7 +225,7 @@ test_expect_success 'GIT_TRACE_CURL does not redact auth details if GIT_TRACE_RE
 		git clone --bare "$HTTPD_URL/auth/smart/repo.git" redact-auth &&
 	expect_askpass both user@host &&
 
-	grep "Authorization: Basic [0-9a-zA-Z+/]" trace
+	grep -i "Authorization: Basic [0-9a-zA-Z+/]" trace
 '
 
 test_expect_success 'disable dumb http on server' '
@@ -474,10 +480,10 @@ test_expect_success 'cookies are redacted by default' '
 	GIT_TRACE_CURL=true \
 		git -c "http.cookieFile=$(pwd)/cookies" clone \
 		$HTTPD_URL/smart/repo.git clone 2>err &&
-	grep "Cookie:.*Foo=<redacted>" err &&
-	grep "Cookie:.*Bar=<redacted>" err &&
-	! grep "Cookie:.*Foo=1" err &&
-	! grep "Cookie:.*Bar=2" err
+	grep -i "Cookie:.*Foo=<redacted>" err &&
+	grep -i "Cookie:.*Bar=<redacted>" err &&
+	! grep -i "Cookie:.*Foo=1" err &&
+	! grep -i "Cookie:.*Bar=2" err
 '
 
 test_expect_success 'empty values of cookies are also redacted' '
@@ -486,7 +492,7 @@ test_expect_success 'empty values of cookies are also redacted' '
 	GIT_TRACE_CURL=true \
 		git -c "http.cookieFile=$(pwd)/cookies" clone \
 		$HTTPD_URL/smart/repo.git clone 2>err &&
-	grep "Cookie:.*Foo=<redacted>" err
+	grep -i "Cookie:.*Foo=<redacted>" err
 '
 
 test_expect_success 'GIT_TRACE_REDACT=0 disables cookie redaction' '
@@ -496,8 +502,8 @@ test_expect_success 'GIT_TRACE_REDACT=0 disables cookie redaction' '
 	GIT_TRACE_REDACT=0 GIT_TRACE_CURL=true \
 		git -c "http.cookieFile=$(pwd)/cookies" clone \
 		$HTTPD_URL/smart/repo.git clone 2>err &&
-	grep "Cookie:.*Foo=1" err &&
-	grep "Cookie:.*Bar=2" err
+	grep -i "Cookie:.*Foo=1" err &&
+	grep -i "Cookie:.*Bar=2" err
 '
 
 test_expect_success 'GIT_TRACE_CURL_NO_DATA prevents data from being traced' '
@@ -556,6 +562,22 @@ test_expect_success 'http auth forgets bogus credentials' '
 	set_askpass user@host pass@host &&
 	git ls-remote "$HTTPD_URL/auth/smart/repo.git" >/dev/null &&
 	expect_askpass both user@host
+'
+
+test_expect_success 'client falls back from v2 to v0 to match server' '
+	GIT_TRACE_PACKET=$PWD/trace \
+	GIT_TEST_PROTOCOL_VERSION=2 \
+	git clone $HTTPD_URL/smart_v0/repo.git repo-v0 &&
+	# check for v0; there the HEAD symref is communicated in the capability
+	# line; v2 uses a different syntax on each ref advertisement line
+	grep symref=HEAD:refs/heads/ trace
+'
+
+test_expect_success 'passing hostname resolution information works' '
+	BOGUS_HOST=gitbogusexamplehost.invalid &&
+	BOGUS_HTTPD_URL=$HTTPD_PROTO://$BOGUS_HOST:$LIB_HTTPD_PORT &&
+	test_must_fail git ls-remote "$BOGUS_HTTPD_URL/smart/repo.git" >/dev/null &&
+	git -c "http.curloptResolve=$BOGUS_HOST:$LIB_HTTPD_PORT:127.0.0.1" ls-remote "$BOGUS_HTTPD_URL/smart/repo.git" >/dev/null
 '
 
 test_done

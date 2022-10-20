@@ -6,6 +6,7 @@ GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
 . ./test-lib.sh
+. "$TEST_DIRECTORY"/lib-terminal.sh
 
 TEST_ROOT="$PWD"
 PATH=$TEST_ROOT:$PATH
@@ -15,9 +16,6 @@ tr \
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' \
   'nopqrstuvwxyzabcdefghijklmNOPQRSTUVWXYZABCDEFGHIJKLM'
 EOF
-
-write_script rot13-filter.pl "$PERL_PATH" \
-	<"$TEST_DIRECTORY"/t0021/rot13-filter.pl
 
 generate_random_characters () {
 	LEN=$1
@@ -75,13 +73,13 @@ test_expect_success setup '
 	git config filter.rot13.clean ./rot13.sh &&
 
 	{
-	    echo "*.t filter=rot13"
+	    echo "*.t filter=rot13" &&
 	    echo "*.i ident"
 	} >.gitattributes &&
 
 	{
-	    echo a b c d e f g h i j k l m
-	    echo n o p q r s t u v w x y z
+	    echo a b c d e f g h i j k l m &&
+	    echo n o p q r s t u v w x y z &&
 	    echo '\''$Id$'\''
 	} >test &&
 	cat test >test.t &&
@@ -117,17 +115,17 @@ test_expect_success check '
 # If an expanded ident ever gets into the repository, we want to make sure that
 # it is collapsed before being expanded again on checkout
 test_expect_success expanded_in_repo '
-	{
-		echo "File with expanded keywords"
-		echo "\$Id\$"
-		echo "\$Id:\$"
-		echo "\$Id: 0000000000000000000000000000000000000000 \$"
-		echo "\$Id: NoSpaceAtEnd\$"
-		echo "\$Id:NoSpaceAtFront \$"
-		echo "\$Id:NoSpaceAtEitherEnd\$"
-		echo "\$Id: NoTerminatingSymbol"
-		echo "\$Id: Foreign Commit With Spaces \$"
-	} >expanded-keywords.0 &&
+	cat >expanded-keywords.0 <<-\EOF &&
+	File with expanded keywords
+	$Id$
+	$Id:$
+	$Id: 0000000000000000000000000000000000000000 $
+	$Id: NoSpaceAtEnd$
+	$Id:NoSpaceAtFront $
+	$Id:NoSpaceAtEitherEnd$
+	$Id: NoTerminatingSymbol
+	$Id: Foreign Commit With Spaces $
+	EOF
 
 	{
 		cat expanded-keywords.0 &&
@@ -138,17 +136,17 @@ test_expect_success expanded_in_repo '
 	git commit -m "File with keywords expanded" &&
 	id=$(git rev-parse --verify :expanded-keywords) &&
 
-	{
-		echo "File with expanded keywords"
-		echo "\$Id: $id \$"
-		echo "\$Id: $id \$"
-		echo "\$Id: $id \$"
-		echo "\$Id: $id \$"
-		echo "\$Id: $id \$"
-		echo "\$Id: $id \$"
-		echo "\$Id: NoTerminatingSymbol"
-		echo "\$Id: Foreign Commit With Spaces \$"
-	} >expected-output.0 &&
+	cat >expected-output.0 <<-EOF &&
+	File with expanded keywords
+	\$Id: $id \$
+	\$Id: $id \$
+	\$Id: $id \$
+	\$Id: $id \$
+	\$Id: $id \$
+	\$Id: $id \$
+	\$Id: NoTerminatingSymbol
+	\$Id: Foreign Commit With Spaces \$
+	EOF
 	{
 		cat expected-output.0 &&
 		printf "\$Id: NoTerminatingSymbolAtEOF"
@@ -158,7 +156,7 @@ test_expect_success expanded_in_repo '
 		printf "\$Id: NoTerminatingSymbolAtEOF"
 	} >expected-output-crlf &&
 	{
-		echo "expanded-keywords ident"
+		echo "expanded-keywords ident" &&
 		echo "expanded-keywords-crlf ident text eol=crlf"
 	} >>.gitattributes &&
 
@@ -284,7 +282,7 @@ test_expect_success 'required filter with absent smudge field' '
 test_expect_success 'filtering large input to small output should use little memory' '
 	test_config filter.devnull.clean "cat >/dev/null" &&
 	test_config filter.devnull.required true &&
-	for i in $(test_seq 1 30); do printf "%1048576d" 1; done >30MB &&
+	for i in $(test_seq 1 30); do printf "%1048576d" 1 || return 1; done >30MB &&
 	echo "30MB filter=devnull" >.gitattributes &&
 	GIT_MMAP_LIMIT=1m GIT_ALLOC_LIMIT=1m git add 30MB
 '
@@ -302,7 +300,7 @@ test_expect_success 'filter that does not read is fine' '
 test_expect_success EXPENSIVE 'filter large file' '
 	test_config filter.largefile.smudge cat &&
 	test_config filter.largefile.clean cat &&
-	for i in $(test_seq 1 2048); do printf "%1048576d" 1; done >2GB &&
+	for i in $(test_seq 1 2048); do printf "%1048576d" 1 || return 1; done >2GB &&
 	echo "2GB filter=largefile" >.gitattributes &&
 	git add 2GB 2>err &&
 	test_must_be_empty err &&
@@ -364,8 +362,8 @@ test_expect_success 'diff does not reuse worktree files that need cleaning' '
 	test_line_count = 0 count
 '
 
-test_expect_success PERL 'required process filter should filter data' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'required process filter should filter data' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	test_config_global filter.protocol.required true &&
 	rm -rf repo &&
 	mkdir repo &&
@@ -449,8 +447,8 @@ test_expect_success PERL 'required process filter should filter data' '
 	)
 '
 
-test_expect_success PERL 'required process filter should filter data for various subcommands' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'required process filter should filter data for various subcommands' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	test_config_global filter.protocol.required true &&
 	(
 		cd repo &&
@@ -560,9 +558,9 @@ test_expect_success PERL 'required process filter should filter data for various
 	)
 '
 
-test_expect_success PERL 'required process filter takes precedence' '
+test_expect_success 'required process filter takes precedence' '
 	test_config_global filter.protocol.clean false &&
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean" &&
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean" &&
 	test_config_global filter.protocol.required true &&
 	rm -rf repo &&
 	mkdir repo &&
@@ -586,8 +584,8 @@ test_expect_success PERL 'required process filter takes precedence' '
 	)
 '
 
-test_expect_success PERL 'required process filter should be used only for "clean" operation only' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean" &&
+test_expect_success 'required process filter should be used only for "clean" operation only' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean" &&
 	rm -rf repo &&
 	mkdir repo &&
 	(
@@ -621,8 +619,8 @@ test_expect_success PERL 'required process filter should be used only for "clean
 	)
 '
 
-test_expect_success PERL 'required process filter should process multiple packets' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'required process filter should process multiple packets' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	test_config_global filter.protocol.required true &&
 
 	rm -rf repo &&
@@ -642,7 +640,7 @@ test_expect_success PERL 'required process filter should process multiple packet
 		for FILE in "$TEST_ROOT"/*.file
 		do
 			cp "$FILE" . &&
-			rot13.sh <"$FILE" >"$FILE.rot13"
+			rot13.sh <"$FILE" >"$FILE.rot13" || return 1
 		done &&
 
 		echo "*.file filter=protocol" >.gitattributes &&
@@ -681,13 +679,13 @@ test_expect_success PERL 'required process filter should process multiple packet
 
 		for FILE in *.file
 		do
-			test_cmp_committed_rot13 "$TEST_ROOT/$FILE" $FILE
+			test_cmp_committed_rot13 "$TEST_ROOT/$FILE" $FILE || return 1
 		done
 	)
 '
 
-test_expect_success PERL 'required process filter with clean error should fail' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'required process filter with clean error should fail' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	test_config_global filter.protocol.required true &&
 	rm -rf repo &&
 	mkdir repo &&
@@ -705,8 +703,8 @@ test_expect_success PERL 'required process filter with clean error should fail' 
 	)
 '
 
-test_expect_success PERL 'process filter should restart after unexpected write failure' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'process filter should restart after unexpected write failure' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	rm -rf repo &&
 	mkdir repo &&
 	(
@@ -734,7 +732,7 @@ test_expect_success PERL 'process filter should restart after unexpected write f
 		rm -f debug.log &&
 		git checkout --quiet --no-progress . 2>git-stderr.log &&
 
-		grep "smudge write error at" git-stderr.log &&
+		grep "smudge write error" git-stderr.log &&
 		test_i18ngrep "error: external filter" git-stderr.log &&
 
 		cat >expected.log <<-EOF &&
@@ -760,8 +758,8 @@ test_expect_success PERL 'process filter should restart after unexpected write f
 	)
 '
 
-test_expect_success PERL 'process filter should not be restarted if it signals an error' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'process filter should not be restarted if it signals an error' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	rm -rf repo &&
 	mkdir repo &&
 	(
@@ -803,8 +801,8 @@ test_expect_success PERL 'process filter should not be restarted if it signals a
 	)
 '
 
-test_expect_success PERL 'process filter abort stops processing of all further files' '
-	test_config_global filter.protocol.process "rot13-filter.pl debug.log clean smudge" &&
+test_expect_success 'process filter abort stops processing of all further files' '
+	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	rm -rf repo &&
 	mkdir repo &&
 	(
@@ -860,10 +858,10 @@ test_expect_success PERL 'invalid process filter must fail (and not hang!)' '
 	)
 '
 
-test_expect_success PERL 'delayed checkout in process filter' '
-	test_config_global filter.a.process "rot13-filter.pl a.log clean smudge delay" &&
+test_expect_success 'delayed checkout in process filter' '
+	test_config_global filter.a.process "test-tool rot13-filter --log=a.log clean smudge delay" &&
 	test_config_global filter.a.required true &&
-	test_config_global filter.b.process "rot13-filter.pl b.log clean smudge delay" &&
+	test_config_global filter.b.process "test-tool rot13-filter --log=b.log clean smudge delay" &&
 	test_config_global filter.b.required true &&
 
 	rm -rf repo &&
@@ -939,8 +937,8 @@ test_expect_success PERL 'delayed checkout in process filter' '
 	)
 '
 
-test_expect_success PERL 'missing file in delayed checkout' '
-	test_config_global filter.bug.process "rot13-filter.pl bug.log clean smudge delay" &&
+test_expect_success 'missing file in delayed checkout' '
+	test_config_global filter.bug.process "test-tool rot13-filter --log=bug.log clean smudge delay" &&
 	test_config_global filter.bug.required true &&
 
 	rm -rf repo &&
@@ -959,8 +957,8 @@ test_expect_success PERL 'missing file in delayed checkout' '
 	grep "error: .missing-delay\.a. was not filtered properly" git-stderr.log
 '
 
-test_expect_success PERL 'invalid file in delayed checkout' '
-	test_config_global filter.bug.process "rot13-filter.pl bug.log clean smudge delay" &&
+test_expect_success 'invalid file in delayed checkout' '
+	test_config_global filter.bug.process "test-tool rot13-filter --log=bug.log clean smudge delay" &&
 	test_config_global filter.bug.required true &&
 
 	rm -rf repo &&
@@ -989,10 +987,10 @@ do
 		mode_prereq='UTF8_NFD_TO_NFC' ;;
 	esac
 
-	test_expect_success PERL,SYMLINKS,$mode_prereq \
+	test_expect_success SYMLINKS,$mode_prereq \
 	"delayed checkout with $mode-collision don't write to the wrong place" '
 		test_config_global filter.delay.process \
-			"\"$TEST_ROOT/rot13-filter.pl\" --always-delay delayed.log clean smudge delay" &&
+			"test-tool rot13-filter --always-delay --log=delayed.log clean smudge delay" &&
 		test_config_global filter.delay.required true &&
 
 		git init $mode-collision &&
@@ -1025,12 +1023,12 @@ do
 	'
 done
 
-test_expect_success PERL,SYMLINKS,CASE_INSENSITIVE_FS \
+test_expect_success SYMLINKS,CASE_INSENSITIVE_FS \
 "delayed checkout with submodule collision don't write to the wrong place" '
 	git init collision-with-submodule &&
 	(
 		cd collision-with-submodule &&
-		git config filter.delay.process "\"$TEST_ROOT/rot13-filter.pl\" --always-delay delayed.log clean smudge delay" &&
+		git config filter.delay.process "test-tool rot13-filter --always-delay --log=delayed.log clean smudge delay" &&
 		git config filter.delay.required true &&
 
 		# We need Git to treat the submodule "a" and the
@@ -1058,6 +1056,98 @@ test_expect_success PERL,SYMLINKS,CASE_INSENSITIVE_FS \
 		git checkout --recurse-submodules . &&
 		grep "IN: smudge A/B/y .* \\[DELAYED\\]" delayed.log &&
 		test_path_is_missing target-dir/y
+	)
+'
+
+test_expect_success 'setup for progress tests' '
+	git init progress &&
+	(
+		cd progress &&
+		git config filter.delay.process "test-tool rot13-filter --log=delay-progress.log clean smudge delay" &&
+		git config filter.delay.required true &&
+
+		echo "*.a filter=delay" >.gitattributes &&
+		touch test-delay10.a &&
+		git add . &&
+		git commit -m files
+	)
+'
+
+test_delayed_checkout_progress () {
+	if test "$1" = "!"
+	then
+		local expect_progress=N &&
+		shift
+	else
+		local expect_progress=
+	fi &&
+
+	if test $# -lt 1
+	then
+		BUG "no command given to test_delayed_checkout_progress"
+	fi &&
+
+	(
+		cd progress &&
+		GIT_PROGRESS_DELAY=0 &&
+		export GIT_PROGRESS_DELAY &&
+		rm -f *.a delay-progress.log &&
+
+		"$@" 2>err &&
+		grep "IN: smudge test-delay10.a .* \\[DELAYED\\]" delay-progress.log &&
+		if test "$expect_progress" = N
+		then
+			! grep "Filtering content" err
+		else
+			grep "Filtering content" err
+		fi
+	)
+}
+
+for mode in pathspec branch
+do
+	case "$mode" in
+	pathspec) opt='.' ;;
+	branch) opt='-f HEAD' ;;
+	esac
+
+	test_expect_success PERL,TTY "delayed checkout shows progress by default on tty ($mode checkout)" '
+		test_delayed_checkout_progress test_terminal git checkout $opt
+	'
+
+	test_expect_success PERL "delayed checkout ommits progress on non-tty ($mode checkout)" '
+		test_delayed_checkout_progress ! git checkout $opt
+	'
+
+	test_expect_success PERL,TTY "delayed checkout ommits progress with --quiet ($mode checkout)" '
+		test_delayed_checkout_progress ! test_terminal git checkout --quiet $opt
+	'
+
+	test_expect_success PERL,TTY "delayed checkout honors --[no]-progress ($mode checkout)" '
+		test_delayed_checkout_progress ! test_terminal git checkout --no-progress $opt &&
+		test_delayed_checkout_progress test_terminal git checkout --quiet --progress $opt
+	'
+done
+
+test_expect_success 'delayed checkout correctly reports the number of updated entries' '
+	rm -rf repo &&
+	git init repo &&
+	(
+		cd repo &&
+		git config filter.delay.process "test-tool rot13-filter --log=delayed.log clean smudge delay" &&
+		git config filter.delay.required true &&
+
+		echo "*.a filter=delay" >.gitattributes &&
+		echo a >test-delay10.a &&
+		echo a >test-delay11.a &&
+		git add . &&
+		git commit -m files &&
+
+		rm *.a &&
+		git checkout . 2>err &&
+		grep "IN: smudge test-delay10.a .* \\[DELAYED\\]" delayed.log &&
+		grep "IN: smudge test-delay11.a .* \\[DELAYED\\]" delayed.log &&
+		grep "Updated 2 paths from the index" err
 	)
 '
 

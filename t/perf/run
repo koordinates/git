@@ -74,7 +74,7 @@ set_git_test_installed () {
 	mydir=$1
 
 	mydir_abs=$(cd $mydir && pwd)
-	mydir_abs_wrappers="$mydir_abs_wrappers/bin-wrappers"
+	mydir_abs_wrappers="$mydir_abs/bin-wrappers"
 	if test -d "$mydir_abs_wrappers"
 	then
 		GIT_TEST_INSTALLED=$mydir_abs_wrappers
@@ -170,6 +170,9 @@ run_subsection () {
 
 	get_var_from_env_or_config "GIT_PERF_MAKE_COMMAND" "perf" "makeCommand"
 	get_var_from_env_or_config "GIT_PERF_MAKE_OPTS" "perf" "makeOpts"
+
+	get_var_from_env_or_config "GIT_PERF_USE_SCALAR" "perf" "useScalar" "--bool"
+	export GIT_PERF_USE_SCALAR
 
 	get_var_from_env_or_config "GIT_PERF_REPO_NAME" "perf" "repoName"
 	export GIT_PERF_REPO_NAME

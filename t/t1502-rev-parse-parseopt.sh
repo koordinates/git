@@ -282,4 +282,65 @@ test_expect_success 'test --parseopt --stuck-long and short option with unset op
 	test_cmp expect output
 '
 
+test_expect_success 'test --parseopt help output: "wrapped" options normal "or:" lines' '
+	sed -e "s/^|//" >spec <<-\EOF &&
+	|cmd [--some-option]
+	|    [--another-option]
+	|cmd [--yet-another-option]
+	|--
+	|h,help    show the help
+	EOF
+
+	sed -e "s/^|//" >expect <<-\END_EXPECT &&
+	|cat <<\EOF
+	|usage: cmd [--some-option]
+	|   or:     [--another-option]
+	|   or: cmd [--yet-another-option]
+	|
+	|    -h, --help            show the help
+	|
+	|EOF
+	END_EXPECT
+
+	test_must_fail git rev-parse --parseopt -- -h >out <spec >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'test --parseopt invalid opt-spec' '
+	test_write_lines x -- "=, x" >spec &&
+	echo "fatal: missing opt-spec before option flags" >expect &&
+	test_must_fail git rev-parse --parseopt -- >out <spec 2>err &&
+	test_cmp expect err
+'
+
+test_expect_success 'test --parseopt help output: multi-line blurb after empty line' '
+	sed -e "s/^|//" >spec <<-\EOF &&
+	|cmd [--some-option]
+	|    [--another-option]
+	|
+	|multi
+	|line
+	|blurb
+	|--
+	|h,help    show the help
+	EOF
+
+	sed -e "s/^|//" >expect <<-\END_EXPECT &&
+	|cat <<\EOF
+	|usage: cmd [--some-option]
+	|   or:     [--another-option]
+	|
+	|    multi
+	|    line
+	|    blurb
+	|
+	|    -h, --help            show the help
+	|
+	|EOF
+	END_EXPECT
+
+	test_must_fail git rev-parse --parseopt -- -h >out <spec >actual &&
+	test_cmp expect actual
+'
+
 test_done

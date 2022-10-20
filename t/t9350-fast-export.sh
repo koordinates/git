@@ -268,6 +268,7 @@ test_expect_success 'signed-tags=warn-strip' '
 
 test_expect_success 'setup submodule' '
 
+	test_config_global protocol.file.allow always &&
 	git checkout -f main &&
 	mkdir sub &&
 	(
@@ -293,6 +294,7 @@ test_expect_success 'setup submodule' '
 
 test_expect_success 'submodule fast-export | fast-import' '
 
+	test_config_global protocol.file.allow always &&
 	SUBENT1=$(git ls-tree main^ sub) &&
 	SUBENT2=$(git ls-tree main sub) &&
 	rm -rf new &&
@@ -498,6 +500,13 @@ test_expect_success 'path limiting with import-marks does not lose unmodified fi
 	git commit -mnext file &&
 	git fast-export --import-marks=marks simple -- file file0 >actual &&
 	grep file0 actual
+'
+
+test_expect_success 'path limiting works' '
+	git fast-export simple -- file >actual &&
+	sed -ne "s/^M .* //p" <actual | sort -u >actual.files &&
+	echo file >expect &&
+	test_cmp expect actual.files
 '
 
 test_expect_success 'avoid corrupt stream with non-existent mark' '
@@ -747,6 +756,38 @@ test_expect_success 'merge commit gets exported with --import-marks' '
 		echo ":1 $(git rev-parse HEAD^^)" >marks &&
 		git fast-export --import-marks=marks main >out &&
 		grep Yeah out
+	)
+'
+
+
+test_expect_success 'fast-export --first-parent outputs all revisions output by revision walk' '
+	git init first-parent &&
+	(
+		cd first-parent &&
+		test_commit A &&
+		git checkout -b topic1 &&
+		test_commit B &&
+		git checkout main &&
+		git merge --no-ff topic1 &&
+
+		git checkout -b topic2 &&
+		test_commit C &&
+		git checkout main &&
+		git merge --no-ff topic2 &&
+
+		test_commit D &&
+
+		git fast-export main -- --first-parent >first-parent-export &&
+		git fast-export main -- --first-parent --reverse >first-parent-reverse-export &&
+		test_cmp first-parent-export first-parent-reverse-export &&
+
+		git init import &&
+		git -C import fast-import <first-parent-export &&
+
+		git log --format="%ad %s" --first-parent main >expected &&
+		git -C import log --format="%ad %s" --all >actual &&
+		test_cmp expected actual &&
+		test_line_count = 4 actual
 	)
 '
 

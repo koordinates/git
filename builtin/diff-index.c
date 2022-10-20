@@ -29,10 +29,10 @@ int cmd_diff_index(int argc, const char **argv, const char *prefix)
 	prefix = precompose_argv_prefix(argc, argv, prefix);
 
 	/*
-	 * We need no diff for merges options, and we need to avoid conflict
-	 * with our own meaning of "-m".
+	 * We need (some of) diff for merges options (e.g., --cc), and we need
+	 * to avoid conflict with our own meaning of "-m".
 	 */
-	diff_merges_suppress_options_parsing();
+	diff_merges_suppress_m_parsing();
 
 	argc = setup_revisions(argc, argv, &rev, NULL);
 	for (i = 1; i < argc; i++) {
@@ -70,6 +70,7 @@ int cmd_diff_index(int argc, const char **argv, const char *prefix)
 		return -1;
 	}
 	result = run_diff_index(&rev, option);
-	UNLEAK(rev);
-	return diff_result_code(&rev.diffopt, result);
+	result = diff_result_code(&rev.diffopt, result);
+	release_revisions(&rev);
+	return result;
 }

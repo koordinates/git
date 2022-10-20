@@ -13,6 +13,7 @@
 #include "builtin.h"
 #include "lockfile.h"
 #include "run-command.h"
+#include "hook.h"
 #include "diff.h"
 #include "diff-merges.h"
 #include "refs.h"
@@ -86,6 +87,7 @@ static int signoff;
 static const char *sign_commit;
 static int autostash;
 static int no_verify;
+static char *into_name;
 
 static struct strategy all_strategy[] = {
 	{ "recursive",  NO_TRIVIAL },
@@ -285,6 +287,8 @@ static struct option builtin_merge_options[] = {
 	{ OPTION_LOWLEVEL_CALLBACK, 'F', "file", &merge_msg, N_("path"),
 		N_("read message from file"), PARSE_OPT_NONEG,
 		NULL, 0, option_read_message },
+	OPT_STRING(0, "into-name", &into_name, N_("name"),
+		   N_("use <name> instead of the real target")),
 	OPT__VERBOSITY(&verbosity),
 	OPT_BOOL(0, "abort", &abort_current_merge,
 		N_("abort the current in-progress merge")),
@@ -309,10 +313,17 @@ static int save_state(struct object_id *stash)
 	int len;
 	struct child_process cp = CHILD_PROCESS_INIT;
 	struct strbuf buffer = STRBUF_INIT;
-	const char *argv[] = {"stash", "create", NULL};
+	struct lock_file lock_file = LOCK_INIT;
+	int fd;
 	int rc = -1;
 
-	cp.argv = argv;
+	fd = repo_hold_locked_index(the_repository, &lock_file, 0);
+	refresh_cache(REFRESH_QUIET);
+	if (0 <= fd)
+		repo_update_index_if_able(the_repository, &lock_file);
+	rollback_lock_file(&lock_file);
+
+	strvec_pushl(&cp.args, "stash", "create", NULL);
 	cp.out = -1;
 	cp.git_cmd = 1;
 
@@ -372,24 +383,26 @@ static void reset_hard(const struct object_id *oid, int verbose)
 static void restore_state(const struct object_id *head,
 			  const struct object_id *stash)
 {
-	struct strbuf sb = STRBUF_INIT;
-	const char *args[] = { "stash", "apply", NULL, NULL };
-
-	if (is_null_oid(stash))
-		return;
+	struct strvec args = STRVEC_INIT;
 
 	reset_hard(head, 1);
 
-	args[2] = oid_to_hex(stash);
+	if (is_null_oid(stash))
+		goto refresh_cache;
+
+	strvec_pushl(&args, "stash", "apply", "--index", "--quiet", NULL);
+	strvec_push(&args, oid_to_hex(stash));
 
 	/*
 	 * It is OK to ignore error here, for example when there was
 	 * nothing to restore.
 	 */
-	run_command_v_opt(args, RUN_GIT_CMD);
+	run_command_v_opt(args.v, RUN_GIT_CMD);
+	strvec_clear(&args);
 
-	strbuf_release(&sb);
-	refresh_cache(REFRESH_QUIET);
+refresh_cache:
+	if (discard_cache() < 0 || read_cache() < 0)
+		die(_("could not read index"));
 }
 
 /* This is called when no merge was necessary. */
@@ -440,6 +453,7 @@ static void squash_message(struct commit *commit, struct commit_list *remotehead
 	}
 	write_file_buf(git_path_squash_msg(the_repository), out.buf, out.len);
 	strbuf_release(&out);
+	release_revisions(&rev);
 }
 
 static void finish(struct commit *head_commit,
@@ -469,7 +483,6 @@ static void finish(struct commit *head_commit,
 			 * We ignore errors in 'gc --auto', since the
 			 * user should see them.
 			 */
-			close_object_store(the_repository->objects);
 			run_auto_maintenance(verbosity < 0);
 		}
 	}
@@ -488,9 +501,10 @@ static void finish(struct commit *head_commit,
 	}
 
 	/* Run a post-merge hook */
-	run_hook_le(NULL, "post-merge", squash ? "1" : "0", NULL);
+	run_hooks_l("post-merge", squash ? "1" : "0", NULL);
 
-	apply_autostash(git_path_merge_autostash(the_repository));
+	if (new_head)
+		apply_autostash(git_path_merge_autostash(the_repository));
 	strbuf_release(&reflog_message);
 }
 
@@ -499,7 +513,6 @@ static void merge_name(const char *remote, struct strbuf *msg)
 {
 	struct commit *remote_head;
 	struct object_id branch_head;
-	struct strbuf buf = STRBUF_INIT;
 	struct strbuf bname = STRBUF_INIT;
 	struct merge_remote_desc *desc;
 	const char *ptr;
@@ -587,7 +600,6 @@ static void merge_name(const char *remote, struct strbuf *msg)
 		oid_to_hex(&remote_head->object.oid), remote);
 cleanup:
 	free(found_ref);
-	strbuf_release(&buf);
 	strbuf_release(&bname);
 }
 
@@ -681,6 +693,7 @@ static int read_tree_trivial(struct object_id *common, struct object_id *head,
 	opts.verbose_update = 1;
 	opts.trivial_merges_only = 1;
 	opts.merge = 1;
+	opts.preserve_ignored = 0; /* FIXME: !overwrite_ignore */
 	trees[nr_trees] = parse_tree_indirect(common);
 	if (!trees[nr_trees++])
 		return -1;
@@ -754,8 +767,10 @@ static int try_merge_strategy(const char *strategy, struct commit_list *common,
 		else
 			clean = merge_recursive(&o, head, remoteheads->item,
 						reversed, &result);
-		if (clean < 0)
-			exit(128);
+		if (clean < 0) {
+			rollback_lock_file(&lock);
+			return 2;
+		}
 		if (write_locked_index(&the_index, &lock,
 				       COMMIT_LOCK | SKIP_IF_UNCHANGED))
 			die(_("unable to write %s"), get_index_file());
@@ -842,15 +857,20 @@ static void prepare_to_commit(struct commit_list *remoteheads)
 	struct strbuf msg = STRBUF_INIT;
 	const char *index_file = get_index_file();
 
-	if (!no_verify && run_commit_hook(0 < option_edit, index_file, "pre-merge-commit", NULL))
-		abort_commit(remoteheads, NULL);
-	/*
-	 * Re-read the index as pre-merge-commit hook could have updated it,
-	 * and write it out as a tree.  We must do this before we invoke
-	 * the editor and after we invoke run_status above.
-	 */
-	if (find_hook("pre-merge-commit"))
-		discard_cache();
+	if (!no_verify) {
+		int invoked_hook;
+
+		if (run_commit_hook(0 < option_edit, index_file, &invoked_hook,
+				    "pre-merge-commit", NULL))
+			abort_commit(remoteheads, NULL);
+		/*
+		 * Re-read the index as pre-merge-commit hook could have updated it,
+		 * and write it out as a tree.  We must do this before we invoke
+		 * the editor and after we invoke run_status above.
+		 */
+		if (invoked_hook)
+			discard_cache();
+	}
 	read_cache_from(index_file);
 	strbuf_addbuf(&msg, &merge_msg);
 	if (squash)
@@ -872,7 +892,8 @@ static void prepare_to_commit(struct commit_list *remoteheads)
 		append_signoff(&msg, ignore_non_trailer(msg.buf, msg.len), 0);
 	write_merge_heads(remoteheads);
 	write_file_buf(git_path_merge_msg(the_repository), msg.buf, msg.len);
-	if (run_commit_hook(0 < option_edit, get_index_file(), "prepare-commit-msg",
+	if (run_commit_hook(0 < option_edit, get_index_file(), NULL,
+			    "prepare-commit-msg",
 			    git_path_merge_msg(the_repository), "merge", NULL))
 		abort_commit(remoteheads, NULL);
 	if (0 < option_edit) {
@@ -881,7 +902,7 @@ static void prepare_to_commit(struct commit_list *remoteheads)
 	}
 
 	if (!no_verify && run_commit_hook(0 < option_edit, get_index_file(),
-					  "commit-msg",
+					  NULL, "commit-msg",
 					  git_path_merge_msg(the_repository), NULL))
 		abort_commit(remoteheads, NULL);
 
@@ -989,6 +1010,7 @@ static int evaluate_result(void)
 	 */
 	cnt += count_unmerged_entries();
 
+	release_revisions(&rev);
 	return cnt;
 }
 
@@ -1121,6 +1143,7 @@ static void prepare_merge_message(struct strbuf *merge_names, struct strbuf *mer
 	opts.add_title = !have_message;
 	opts.shortlog_len = shortlog_len;
 	opts.credit_people = (0 < option_edit);
+	opts.into_name = into_name;
 
 	fmt_merge_msg(merge_names, merge_msg, &opts);
 	if (merge_msg->len)
@@ -1138,9 +1161,7 @@ static void handle_fetch_head(struct commit_list **remotes, struct strbuf *merge
 		merge_names = &fetch_head_file;
 
 	filename = git_path_fetch_head(the_repository);
-	fd = open(filename, O_RDONLY);
-	if (fd < 0)
-		die_errno(_("could not open '%s' for reading"), filename);
+	fd = xopen(filename, O_RDONLY);
 
 	if (strbuf_read(merge_names, fd, 0) < 0)
 		die_errno(_("could not read '%s'"), filename);
@@ -1271,12 +1292,15 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 	int best_cnt = -1, merge_was_ok = 0, automerge_was_ok = 0;
 	struct commit_list *common = NULL;
 	const char *best_strategy = NULL, *wt_strategy = NULL;
-	struct commit_list *remoteheads, *p;
+	struct commit_list *remoteheads = NULL, *p;
 	void *branch_to_free;
 	int orig_argc = argc;
 
 	if (argc == 2 && !strcmp(argv[1], "-h"))
 		usage_with_options(builtin_merge_usage, builtin_merge_options);
+
+	prepare_repo_settings(the_repository);
+	the_repository->settings.command_requires_full_index = 0;
 
 	/*
 	 * Check if we are _not_ on a detached HEAD, i.e. if there is a
@@ -1370,14 +1394,14 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		 * There is no unmerged entry, don't advise 'git
 		 * add/rm <file>', just 'git commit'.
 		 */
-		if (advice_resolve_conflict)
+		if (advice_enabled(ADVICE_RESOLVE_CONFLICT))
 			die(_("You have not concluded your merge (MERGE_HEAD exists).\n"
 				  "Please, commit your changes before you merge."));
 		else
 			die(_("You have not concluded your merge (MERGE_HEAD exists)."));
 	}
 	if (ref_exists("CHERRY_PICK_HEAD")) {
-		if (advice_resolve_conflict)
+		if (advice_enabled(ADVICE_RESOLVE_CONFLICT))
 			die(_("You have not concluded your cherry-pick (CHERRY_PICK_HEAD exists).\n"
 			    "Please, commit your changes before you merge."));
 		else
@@ -1395,9 +1419,9 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 
 	if (squash) {
 		if (fast_forward == FF_NO)
-			die(_("You cannot combine --squash with --no-ff."));
+			die(_("options '%s' and '%s' cannot be used together"), "--squash", "--no-ff.");
 		if (option_commit > 0)
-			die(_("You cannot combine --squash with --commit."));
+			die(_("options '%s' and '%s' cannot be used together"), "--squash", "--commit.");
 		/*
 		 * squash can now silently disable option_commit - this is not
 		 * a problem as it is only overriding the default, not a user
@@ -1563,8 +1587,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 
 		if (autostash)
 			create_autostash(the_repository,
-					 git_path_merge_autostash(the_repository),
-					 "merge");
+					 git_path_merge_autostash(the_repository));
 		if (checkout_fast_forward(the_repository,
 					  &head_commit->object.oid,
 					  &commit->object.oid,
@@ -1576,6 +1599,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 
 		finish(head_commit, remoteheads, &commit->object.oid, msg.buf);
 		remove_merge_branch_state(the_repository);
+		strbuf_release(&msg);
 		goto done;
 	} else if (!remoteheads->next && common->next)
 		;
@@ -1590,6 +1614,21 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		 */
 		refresh_cache(REFRESH_QUIET);
 		if (allow_trivial && fast_forward != FF_ONLY) {
+			/*
+			 * Must first ensure that index matches HEAD before
+			 * attempting a trivial merge.
+			 */
+			struct tree *head_tree = get_commit_tree(head_commit);
+			struct strbuf sb = STRBUF_INIT;
+
+			if (repo_index_has_changes(the_repository, head_tree,
+						   &sb)) {
+				error(_("Your local changes to the following files would be overwritten by merge:\n  %s"),
+				      sb.buf);
+				strbuf_release(&sb);
+				return 2;
+			}
+
 			/* See if it is really trivial. */
 			git_committer_info(IDENT_STRICT);
 			printf(_("Trying really trivial in-index merge...\n"));
@@ -1634,8 +1673,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 
 	if (autostash)
 		create_autostash(the_repository,
-				 git_path_merge_autostash(the_repository),
-				 "merge");
+				 git_path_merge_autostash(the_repository));
 
 	/* We are going to make a new commit. */
 	git_committer_info(IDENT_STRICT);
@@ -1647,15 +1685,15 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 	 * tree in the index -- this means that the index must be in
 	 * sync with the head commit.  The strategies are responsible
 	 * to ensure this.
+	 *
+	 * Stash away the local changes so that we can try more than one
+	 * and/or recover from merge strategies bailing while leaving the
+	 * index and working tree polluted.
 	 */
-	if (use_strategies_nr == 1 ||
-	    /*
-	     * Stash away the local changes so that we can try more than one.
-	     */
-	    save_state(&stash))
+	if (save_state(&stash))
 		oidclr(&stash);
 
-	for (i = 0; !merge_was_ok && i < use_strategies_nr; i++) {
+	for (i = 0; i < use_strategies_nr; i++) {
 		int ret, cnt;
 		if (i) {
 			printf(_("Rewinding the tree to pristine...\n"));
@@ -1670,7 +1708,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		 */
 		wt_strategy = use_strategies[i]->name;
 
-		ret = try_merge_strategy(use_strategies[i]->name,
+		ret = try_merge_strategy(wt_strategy,
 					 common, remoteheads,
 					 head_commit);
 		/*
@@ -1680,16 +1718,17 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		 */
 		if (ret < 2) {
 			if (!ret) {
-				if (option_commit) {
-					/* Automerge succeeded. */
-					automerge_was_ok = 1;
-					break;
-				}
+				/*
+				 * This strategy worked; no point in trying
+				 * another.
+				 */
 				merge_was_ok = 1;
+				best_strategy = wt_strategy;
+				break;
 			}
 			cnt = (use_strategies_nr > 1) ? evaluate_result() : 0;
 			if (best_cnt <= 0 || cnt <= best_cnt) {
-				best_strategy = use_strategies[i]->name;
+				best_strategy = wt_strategy;
 				best_cnt = cnt;
 			}
 		}
@@ -1699,7 +1738,8 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 	 * If we have a resulting tree, that means the strategy module
 	 * auto resolved the merge cleanly.
 	 */
-	if (automerge_was_ok) {
+	if (merge_was_ok && option_commit) {
+		automerge_was_ok = 1;
 		ret = finish_automerge(head_commit, head_subsumed,
 				       common, remoteheads,
 				       &result_tree, wt_strategy);
@@ -1744,8 +1784,15 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 			"stopped before committing as requested\n"));
 	else
 		ret = suggest_conflicts();
+	if (autostash)
+		printf(_("When finished, apply stashed changes with `git stash pop`\n"));
 
 done:
+	if (!automerge_was_ok) {
+		free_commit_list(common);
+		free_commit_list(remoteheads);
+	}
+	strbuf_release(&buf);
 	free(branch_to_free);
 	return ret;
 }

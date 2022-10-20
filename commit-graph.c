@@ -39,8 +39,8 @@ void git_test_write_commit_graph_or_die(void)
 #define GRAPH_CHUNKID_OIDFANOUT 0x4f494446 /* "OIDF" */
 #define GRAPH_CHUNKID_OIDLOOKUP 0x4f49444c /* "OIDL" */
 #define GRAPH_CHUNKID_DATA 0x43444154 /* "CDAT" */
-#define GRAPH_CHUNKID_GENERATION_DATA 0x47444154 /* "GDAT" */
-#define GRAPH_CHUNKID_GENERATION_DATA_OVERFLOW 0x47444f56 /* "GDOV" */
+#define GRAPH_CHUNKID_GENERATION_DATA 0x47444132 /* "GDA2" */
+#define GRAPH_CHUNKID_GENERATION_DATA_OVERFLOW 0x47444f32 /* "GDO2" */
 #define GRAPH_CHUNKID_EXTRAEDGES 0x45444745 /* "EDGE" */
 #define GRAPH_CHUNKID_BLOOMINDEXES 0x42494458 /* "BIDX" */
 #define GRAPH_CHUNKID_BLOOMDATA 0x42444154 /* "BDAT" */
@@ -193,18 +193,6 @@ char *get_commit_graph_chain_filename(struct object_directory *odb)
 	return xstrfmt("%s/info/commit-graphs/commit-graph-chain", odb->path);
 }
 
-static uint8_t oid_version(void)
-{
-	switch (hash_algo_by_ptr(the_hash_algo)) {
-	case GIT_HASH_SHA1:
-		return 1;
-	case GIT_HASH_SHA256:
-		return 2;
-	default:
-		die(_("invalid hash version"));
-	}
-}
-
 static struct commit_graph *alloc_commit_graph(void)
 {
 	struct commit_graph *g = xcalloc(1, sizeof(*g));
@@ -264,7 +252,8 @@ struct commit_graph *load_commit_graph_one_fd_st(struct repository *r,
 	}
 	graph_map = xmmap(NULL, graph_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
-	ret = parse_commit_graph(r, graph_map, graph_size);
+	prepare_repo_settings(r);
+	ret = parse_commit_graph(&r->settings, graph_map, graph_size);
 
 	if (ret)
 		ret->odb = odb;
@@ -333,7 +322,7 @@ static int graph_read_bloom_data(const unsigned char *chunk_start,
 	return 0;
 }
 
-struct commit_graph *parse_commit_graph(struct repository *r,
+struct commit_graph *parse_commit_graph(struct repo_settings *s,
 					void *graph_map, size_t graph_size)
 {
 	const unsigned char *data;
@@ -365,13 +354,11 @@ struct commit_graph *parse_commit_graph(struct repository *r,
 	}
 
 	hash_version = *(unsigned char*)(data + 5);
-	if (hash_version != oid_version()) {
+	if (hash_version != oid_version(the_hash_algo)) {
 		error(_("commit-graph hash version %X does not match version %X"),
-		      hash_version, oid_version());
+		      hash_version, oid_version(the_hash_algo));
 		return NULL;
 	}
-
-	prepare_repo_settings(r);
 
 	graph = alloc_commit_graph();
 
@@ -402,14 +389,17 @@ struct commit_graph *parse_commit_graph(struct repository *r,
 	pair_chunk(cf, GRAPH_CHUNKID_EXTRAEDGES, &graph->chunk_extra_edges);
 	pair_chunk(cf, GRAPH_CHUNKID_BASE, &graph->chunk_base_graphs);
 
-	if (get_configured_generation_version(r) >= 2) {
+	if (s->commit_graph_generation_version >= 2) {
 		pair_chunk(cf, GRAPH_CHUNKID_GENERATION_DATA,
 			&graph->chunk_generation_data);
 		pair_chunk(cf, GRAPH_CHUNKID_GENERATION_DATA_OVERFLOW,
 			&graph->chunk_generation_data_overflow);
+
+		if (graph->chunk_generation_data)
+			graph->read_generation_data = 1;
 	}
 
-	if (r->settings.commit_graph_read_changed_paths) {
+	if (s->commit_graph_read_changed_paths) {
 		pair_chunk(cf, GRAPH_CHUNKID_BLOOMINDEXES,
 			   &graph->chunk_bloom_indexes);
 		read_chunk(cf, GRAPH_CHUNKID_BLOOMDATA,
@@ -520,10 +510,13 @@ static struct commit_graph *load_commit_graph_chain(struct repository *r,
 	stat_res = stat(chain_name, &st);
 	free(chain_name);
 
-	if (!fp ||
-	    stat_res ||
-	    st.st_size <= the_hash_algo->hexsz)
+	if (!fp)
 		return NULL;
+	if (stat_res ||
+	    st.st_size <= the_hash_algo->hexsz) {
+		fclose(fp);
+		return NULL;
+	}
 
 	count = st.st_size / (the_hash_algo->hexsz + 1);
 	CALLOC_ARRAY(oids, count);
@@ -632,10 +625,13 @@ static int prepare_commit_graph(struct repository *r)
 	struct object_directory *odb;
 
 	/*
+	 * Early return if there is no git dir or if the commit graph is
+	 * disabled.
+	 *
 	 * This must come before the "already attempted?" check below, because
 	 * we want to disable even an already-loaded graph file.
 	 */
-	if (r->commit_graph_disabled)
+	if (!r->gitdir || r->commit_graph_disabled)
 		return 0;
 
 	if (r->objects->commit_graph_attempted)
@@ -713,6 +709,7 @@ static void close_commit_graph_one(struct commit_graph *g)
 	if (!g)
 		return;
 
+	clear_commit_graph_data_slab(&commit_graph_data_slab);
 	close_commit_graph_one(g->base_graph);
 	free_commit_graph(g);
 }
@@ -799,7 +796,7 @@ static void fill_commit_graph_info(struct commit *item, struct commit_graph *g, 
 				die(_("commit-graph requires overflow generation data but has none"));
 
 			offset_pos = offset ^ CORRECTED_COMMIT_DATE_OFFSET_OVERFLOW;
-			graph_data->generation = get_be64(g->chunk_generation_data_overflow + 8 * offset_pos);
+			graph_data->generation = item->date + get_be64(g->chunk_generation_data_overflow + 8 * offset_pos);
 		} else
 			graph_data->generation = item->date + offset;
 	} else
@@ -891,16 +888,24 @@ static int find_commit_pos_in_graph(struct commit *item, struct commit_graph *g,
 	}
 }
 
+int repo_find_commit_pos_in_graph(struct repository *r, struct commit *c,
+				  uint32_t *pos)
+{
+	if (!prepare_commit_graph(r))
+		return 0;
+	return find_commit_pos_in_graph(c, r->objects->commit_graph, pos);
+}
+
 struct commit *lookup_commit_in_graph(struct repository *repo, const struct object_id *id)
 {
 	struct commit *commit;
 	uint32_t pos;
 
-	if (!repo->objects->commit_graph)
+	if (!prepare_commit_graph(repo))
 		return NULL;
 	if (!search_commit_pos_in_graph(id, repo->objects->commit_graph, &pos))
 		return NULL;
-	if (!repo_has_object_file(repo, id))
+	if (!has_object(repo, id, 0))
 		return NULL;
 
 	commit = lookup_commit(repo, id);
@@ -948,9 +953,7 @@ int parse_commit_in_graph(struct repository *r, struct commit *item)
 void load_commit_graph_info(struct repository *r, struct commit *item)
 {
 	uint32_t pos;
-	if (!prepare_commit_graph(r))
-		return;
-	if (find_commit_pos_in_graph(item, r->objects->commit_graph, &pos))
+	if (repo_find_commit_pos_in_graph(r, item, &pos))
 		fill_commit_graph_info(item, r->objects->commit_graph, pos);
 }
 
@@ -1552,11 +1555,15 @@ static void compute_generation_numbers(struct write_commit_graph_context *ctx)
 				if (current->date && current->date > max_corrected_commit_date)
 					max_corrected_commit_date = current->date - 1;
 				commit_graph_data_at(current)->generation = max_corrected_commit_date + 1;
-
-				if (commit_graph_data_at(current)->generation - current->date > GENERATION_NUMBER_V2_OFFSET_MAX)
-					ctx->num_generation_data_overflows++;
 			}
 		}
+	}
+
+	for (i = 0; i < ctx->commits.nr; i++) {
+		struct commit *c = ctx->commits.list[i];
+		timestamp_t offset = commit_graph_data_at(c)->generation - c->date;
+		if (offset > GENERATION_NUMBER_V2_OFFSET_MAX)
+			ctx->num_generation_data_overflows++;
 	}
 	stop_progress(&ctx->progress);
 }
@@ -1632,9 +1639,9 @@ struct refs_cb_data {
 	struct progress *progress;
 };
 
-static int add_ref_to_set(const char *refname,
+static int add_ref_to_set(const char *refname UNUSED,
 			  const struct object_id *oid,
-			  int flags, void *cb_data)
+			  int flags UNUSED, void *cb_data)
 {
 	struct object_id peeled;
 	struct refs_cb_data *data = (struct refs_cb_data *)cb_data;
@@ -1675,21 +1682,22 @@ int write_commit_graph_reachable(struct object_directory *odb,
 }
 
 static int fill_oids_from_packs(struct write_commit_graph_context *ctx,
-				struct string_list *pack_indexes)
+				const struct string_list *pack_indexes)
 {
 	uint32_t i;
 	struct strbuf progress_title = STRBUF_INIT;
 	struct strbuf packname = STRBUF_INIT;
 	int dirlen;
+	int ret = 0;
 
 	strbuf_addf(&packname, "%s/pack/", ctx->odb->path);
 	dirlen = packname.len;
 	if (ctx->report_progress) {
 		strbuf_addf(&progress_title,
-			    Q_("Finding commits for commit graph in %d pack",
-			       "Finding commits for commit graph in %d packs",
+			    Q_("Finding commits for commit graph in %"PRIuMAX" pack",
+			       "Finding commits for commit graph in %"PRIuMAX" packs",
 			       pack_indexes->nr),
-			    pack_indexes->nr);
+			    (uintmax_t)pack_indexes->nr);
 		ctx->progress = start_delayed_progress(progress_title.buf, 0);
 		ctx->progress_done = 0;
 	}
@@ -1699,12 +1707,12 @@ static int fill_oids_from_packs(struct write_commit_graph_context *ctx,
 		strbuf_addstr(&packname, pack_indexes->items[i].string);
 		p = add_packed_git(packname.buf, packname.len, 1);
 		if (!p) {
-			error(_("error adding pack %s"), packname.buf);
-			return -1;
+			ret = error(_("error adding pack %s"), packname.buf);
+			goto cleanup;
 		}
 		if (open_pack_index(p)) {
-			error(_("error opening index for %s"), packname.buf);
-			return -1;
+			ret = error(_("error opening index for %s"), packname.buf);
+			goto cleanup;
 		}
 		for_each_object_in_pack(p, add_packed_commits, ctx,
 					FOR_EACH_OBJECT_PACK_ORDER);
@@ -1712,11 +1720,12 @@ static int fill_oids_from_packs(struct write_commit_graph_context *ctx,
 		free(p);
 	}
 
+cleanup:
 	stop_progress(&ctx->progress);
 	strbuf_release(&progress_title);
 	strbuf_release(&packname);
 
-	return 0;
+	return ret;
 }
 
 static int fill_oids_from_commits(struct write_commit_graph_context *ctx,
@@ -1848,6 +1857,7 @@ static int write_commit_graph_file(struct write_commit_graph_context *ctx)
 
 		hold_lock_file_for_update_mode(&lk, lock_name,
 					       LOCK_DIE_ON_ERROR, 0444);
+		free(lock_name);
 
 		fd = git_mkstemp_mode(ctx->graph_name, 0444);
 		if (fd < 0) {
@@ -1907,7 +1917,7 @@ static int write_commit_graph_file(struct write_commit_graph_context *ctx)
 	hashwrite_be32(f, GRAPH_SIGNATURE);
 
 	hashwrite_u8(f, GRAPH_VERSION);
-	hashwrite_u8(f, oid_version());
+	hashwrite_u8(f, oid_version(the_hash_algo));
 	hashwrite_u8(f, get_num_chunks(cf));
 	hashwrite_u8(f, ctx->num_commit_graphs_after - 1);
 
@@ -1938,7 +1948,8 @@ static int write_commit_graph_file(struct write_commit_graph_context *ctx)
 	}
 
 	close_commit_graph(ctx->r->objects);
-	finalize_hashfile(f, file_hash, CSUM_HASH_IN_STREAM | CSUM_FSYNC);
+	finalize_hashfile(f, file_hash, FSYNC_COMPONENT_COMMIT_GRAPH,
+			  CSUM_HASH_IN_STREAM | CSUM_FSYNC);
 	free_chunkfile(cf);
 
 	if (ctx->split) {
@@ -1972,6 +1983,7 @@ static int write_commit_graph_file(struct write_commit_graph_context *ctx)
 		} else {
 			char *graph_name = get_commit_graph_filename(ctx->odb);
 			unlink(graph_name);
+			free(graph_name);
 		}
 
 		ctx->commit_graph_hash_after[ctx->num_commit_graphs_after - 1] = xstrdup(hash_to_hex(file_hash));
@@ -2125,7 +2137,7 @@ static void sort_and_scan_merged_commits(struct write_commit_graph_context *ctx)
 
 	ctx->num_extra_edges = 0;
 	for (i = 0; i < ctx->commits.nr; i++) {
-		display_progress(ctx->progress, i);
+		display_progress(ctx->progress, i + 1);
 
 		if (i && oideq(&ctx->commits.list[i - 1]->object.oid,
 			  &ctx->commits.list[i]->object.oid)) {
@@ -2190,7 +2202,8 @@ static void mark_commit_graphs(struct write_commit_graph_context *ctx)
 		struct stat st;
 		struct utimbuf updated_time;
 
-		stat(ctx->commit_graph_filenames_before[i], &st);
+		if (stat(ctx->commit_graph_filenames_before[i], &st) < 0)
+			continue;
 
 		updated_time.actime = st.st_atime;
 		updated_time.modtime = now;
@@ -2231,7 +2244,8 @@ static void expire_commit_graphs(struct write_commit_graph_context *ctx)
 		strbuf_setlen(&path, dirnamelen);
 		strbuf_addstr(&path, de->d_name);
 
-		stat(path.buf, &st);
+		if (stat(path.buf, &st) < 0)
+			continue;
 
 		if (st.st_mtime > expire_time)
 			continue;
@@ -2251,11 +2265,13 @@ static void expire_commit_graphs(struct write_commit_graph_context *ctx)
 	}
 
 out:
+	if(dir)
+		closedir(dir);
 	strbuf_release(&path);
 }
 
 int write_commit_graph(struct object_directory *odb,
-		       struct string_list *pack_indexes,
+		       const struct string_list *const pack_indexes,
 		       struct oidset *commits,
 		       enum commit_graph_write_flags flags,
 		       const struct commit_graph_opts *opts)
@@ -2551,7 +2567,7 @@ int verify_commit_graph(struct repository *r, struct commit_graph *g, int flags)
 		odb_parents = odb_commit->parents;
 
 		while (graph_parents) {
-			if (odb_parents == NULL) {
+			if (!odb_parents) {
 				graph_report(_("commit-graph parent list for commit %s is too long"),
 					     oid_to_hex(&cur_oid));
 				break;
@@ -2574,7 +2590,7 @@ int verify_commit_graph(struct repository *r, struct commit_graph *g, int flags)
 			odb_parents = odb_parents->next;
 		}
 
-		if (odb_parents != NULL)
+		if (odb_parents)
 			graph_report(_("commit-graph parent list for commit %s terminates early"),
 				     oid_to_hex(&cur_oid));
 

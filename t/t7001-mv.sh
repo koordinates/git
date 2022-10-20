@@ -2,10 +2,30 @@
 
 test_description='git mv in subdirs'
 . ./test-lib.sh
+. "$TEST_DIRECTORY"/lib-diff-data.sh
+
+test_expect_success 'mv -f refreshes updated index entry' '
+	echo test >bar &&
+	git add bar &&
+	git commit -m test &&
+
+	echo foo >foo &&
+	git add foo &&
+
+	# Wait one second to ensure ctime of rename will differ from original
+	# file creation ctime.
+	sleep 1 &&
+	git mv -f foo bar &&
+	git reset --merge HEAD &&
+
+	# Verify the index has been reset
+	git diff-files >out &&
+	test_must_be_empty out
+'
 
 test_expect_success 'prepare reference tree' '
 	mkdir path0 path1 &&
-	cp "$TEST_DIRECTORY"/../COPYING path0/COPYING &&
+	COPYING_test_data >path0/COPYING &&
 	git add path0/COPYING &&
 	git commit -m add -a
 '
@@ -107,7 +127,7 @@ test_expect_success 'clean up' '
 '
 
 test_expect_success 'adding another file' '
-	cp "$TEST_DIRECTORY"/../README.md path0/README &&
+	COPYING_test_data | tr A-Za-z N-ZA-Mn-za-m >path0/README &&
 	git add path0/README &&
 	git commit -m add2 -a
 '
@@ -304,6 +324,7 @@ test_expect_success SYMLINKS 'check moved symlink' '
 rm -f moved symlink
 
 test_expect_success 'setup submodule' '
+	test_config_global protocol.file.allow always &&
 	git commit -m initial &&
 	git reset --hard &&
 	git submodule add ./. sub &&
@@ -489,6 +510,7 @@ test_expect_success 'moving a submodule in nested directories' '
 '
 
 test_expect_success 'moving nested submodules' '
+	test_config_global protocol.file.allow always &&
 	git commit -am "cleanup commit" &&
 	mkdir sub_nested_nested &&
 	(

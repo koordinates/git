@@ -4,9 +4,7 @@
 #include "git-compat-util.h"
 #include "repository.h"
 
-#if defined(SHA1_PPC)
-#include "ppc/sha1.h"
-#elif defined(SHA1_APPLE)
+#if defined(SHA1_APPLE)
 #include <CommonCrypto/CommonDigest.h>
 #elif defined(SHA1_OPENSSL)
 #include <openssl/sha.h>
@@ -16,7 +14,9 @@
 #include "block-sha1/sha1.h"
 #endif
 
-#if defined(SHA256_GCRYPT)
+#if defined(SHA256_NETTLE)
+#include "sha256/nettle.h"
+#elif defined(SHA256_GCRYPT)
 #define SHA256_NEEDS_CLONE_HELPER
 #include "sha256/gcrypt.h"
 #elif defined(SHA256_OPENSSL)
@@ -30,7 +30,7 @@
  * platform's underlying implementation of SHA-1; could be OpenSSL,
  * blk_SHA, Apple CommonCrypto, etc...  Note that the relevant
  * SHA-1 header may have already defined platform_SHA_CTX for our
- * own implementations like block-sha1 and ppc-sha1, so we list
+ * own implementations like block-sha1, so we list
  * the default for OpenSSL compatible SHA-1 implementations here.
  */
 #define platform_SHA_CTX	SHA_CTX
@@ -95,11 +95,17 @@ static inline void git_SHA256_Clone(git_SHA256_CTX *dst, const git_SHA256_CTX *s
 /* Number of algorithms supported (including unknown). */
 #define GIT_HASH_NALGOS (GIT_HASH_SHA256 + 1)
 
+/* "sha1", big-endian */
+#define GIT_SHA1_FORMAT_ID 0x73686131
+
 /* The length in bytes and in hex digits of an object name (SHA-1 value). */
 #define GIT_SHA1_RAWSZ 20
 #define GIT_SHA1_HEXSZ (2 * GIT_SHA1_RAWSZ)
 /* The block size of SHA-1. */
 #define GIT_SHA1_BLKSZ 64
+
+/* "s256", big-endian */
+#define GIT_SHA256_FORMAT_ID 0x73323536
 
 /* The length in bytes and in hex digits of an object name (SHA-256 value). */
 #define GIT_SHA256_RAWSZ 32

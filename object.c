@@ -199,7 +199,7 @@ struct object *lookup_object_by_type(struct repository *r,
 	case OBJ_BLOB:
 		return (struct object *)lookup_blob(r, oid);
 	default:
-		die("BUG: unknown object type %d", type);
+		BUG("unknown object type %d", type);
 	}
 }
 
@@ -263,8 +263,11 @@ struct object *parse_object_or_die(const struct object_id *oid,
 	die(_("unable to parse object: %s"), name ? name : oid_to_hex(oid));
 }
 
-struct object *parse_object(struct repository *r, const struct object_id *oid)
+struct object *parse_object_with_flags(struct repository *r,
+				       const struct object_id *oid,
+				       enum parse_object_flags flags)
 {
+	int skip_hash = !!(flags & PARSE_OBJECT_SKIP_HASH_CHECK);
 	unsigned long size;
 	enum object_type type;
 	int eaten;
@@ -276,10 +279,16 @@ struct object *parse_object(struct repository *r, const struct object_id *oid)
 	if (obj && obj->parsed)
 		return obj;
 
+	if (skip_hash) {
+		struct commit *commit = lookup_commit_in_graph(r, repl);
+		if (commit)
+			return &commit->object;
+	}
+
 	if ((obj && obj->type == OBJ_BLOB && repo_has_object_file(r, oid)) ||
 	    (!obj && repo_has_object_file(r, oid) &&
 	     oid_object_info(r, oid, NULL) == OBJ_BLOB)) {
-		if (check_object_signature(r, repl, NULL, 0, NULL) < 0) {
+		if (!skip_hash && stream_object_signature(r, repl) < 0) {
 			error(_("hash mismatch %s"), oid_to_hex(oid));
 			return NULL;
 		}
@@ -289,8 +298,8 @@ struct object *parse_object(struct repository *r, const struct object_id *oid)
 
 	buffer = repo_read_object_file(r, oid, &type, &size);
 	if (buffer) {
-		if (check_object_signature(r, repl, buffer, size,
-					   type_name(type)) < 0) {
+		if (!skip_hash &&
+		    check_object_signature(r, repl, buffer, size, type) < 0) {
 			free(buffer);
 			error(_("hash mismatch %s"), oid_to_hex(repl));
 			return NULL;
@@ -303,6 +312,11 @@ struct object *parse_object(struct repository *r, const struct object_id *oid)
 		return obj;
 	}
 	return NULL;
+}
+
+struct object *parse_object(struct repository *r, const struct object_id *oid)
+{
+	return parse_object_with_flags(r, oid, 0);
 }
 
 struct object_list *object_list_insert(struct object *item,
@@ -513,7 +527,7 @@ struct raw_object_store *raw_object_store_new(void)
 	return o;
 }
 
-static void free_object_directory(struct object_directory *odb)
+void free_object_directory(struct object_directory *odb)
 {
 	free(odb->path);
 	odb_clear_loose_cache(odb);

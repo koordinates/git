@@ -25,7 +25,7 @@ struct cmd_struct {
 };
 
 const char git_usage_string[] =
-	N_("git [--version] [--help] [-C <path>] [-c <name>=<value>]\n"
+	N_("git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]\n"
 	   "           [--exec-path[=<path>]] [--html-path] [--man-path] [--info-path]\n"
 	   "           [-p | --paginate | -P | --no-pager] [--no-replace-objects] [--bare]\n"
 	   "           [--git-dir=<path>] [--work-tree=<path>] [--namespace=<name>]\n"
@@ -146,7 +146,8 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 		 * commands can be written with "--" prepended
 		 * to make them look like flags.
 		 */
-		if (!strcmp(cmd, "--help") || !strcmp(cmd, "--version"))
+		if (!strcmp(cmd, "--help") || !strcmp(cmd, "-h") ||
+		    !strcmp(cmd, "--version") || !strcmp(cmd, "-v"))
 			break;
 
 		/*
@@ -185,7 +186,7 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 				*envchanged = 1;
 		} else if (!strcmp(cmd, "--git-dir")) {
 			if (*argc < 2) {
-				fprintf(stderr, _("no directory given for --git-dir\n" ));
+				fprintf(stderr, _("no directory given for '%s' option\n" ), "--git-dir");
 				usage(git_usage_string);
 			}
 			setenv(GIT_DIR_ENVIRONMENT, (*argv)[1], 1);
@@ -213,7 +214,7 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 				*envchanged = 1;
 		} else if (!strcmp(cmd, "--work-tree")) {
 			if (*argc < 2) {
-				fprintf(stderr, _("no directory given for --work-tree\n" ));
+				fprintf(stderr, _("no directory given for '%s' option\n" ), "--work-tree");
 				usage(git_usage_string);
 			}
 			setenv(GIT_WORK_TREE_ENVIRONMENT, (*argv)[1], 1);
@@ -297,7 +298,7 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 				*envchanged = 1;
 		} else if (!strcmp(cmd, "-C")) {
 			if (*argc < 2) {
-				fprintf(stderr, _("no directory given for -C\n" ));
+				fprintf(stderr, _("no directory given for '%s' option\n" ), "-C");
 				usage(git_usage_string);
 			}
 			if ((*argv)[1][0]) {
@@ -421,27 +422,31 @@ static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
 	int status, help;
 	struct stat st;
 	const char *prefix;
+	int run_setup = (p->option & (RUN_SETUP | RUN_SETUP_GENTLY));
 
-	prefix = NULL;
 	help = argc == 2 && !strcmp(argv[1], "-h");
-	if (!help) {
-		if (p->option & RUN_SETUP)
-			prefix = setup_git_directory();
-		else if (p->option & RUN_SETUP_GENTLY) {
-			int nongit_ok;
-			prefix = setup_git_directory_gently(&nongit_ok);
-		}
-		precompose_argv_prefix(argc, argv, NULL);
-		if (use_pager == -1 && p->option & (RUN_SETUP | RUN_SETUP_GENTLY) &&
-		    !(p->option & DELAY_PAGER_CONFIG))
-			use_pager = check_pager_config(p->cmd);
-		if (use_pager == -1 && p->option & USE_PAGER)
-			use_pager = 1;
+	if (help && (run_setup & RUN_SETUP))
+		/* demote to GENTLY to allow 'git cmd -h' outside repo */
+		run_setup = RUN_SETUP_GENTLY;
 
-		if ((p->option & (RUN_SETUP | RUN_SETUP_GENTLY)) &&
-		    startup_info->have_repository) /* get_git_dir() may set up repo, avoid that */
-			trace_repo_setup(prefix);
+	if (run_setup & RUN_SETUP) {
+		prefix = setup_git_directory();
+	} else if (run_setup & RUN_SETUP_GENTLY) {
+		int nongit_ok;
+		prefix = setup_git_directory_gently(&nongit_ok);
+	} else {
+		prefix = NULL;
 	}
+	assert(!prefix || *prefix);
+	precompose_argv_prefix(argc, argv, NULL);
+	if (use_pager == -1 && run_setup &&
+		!(p->option & DELAY_PAGER_CONFIG))
+		use_pager = check_pager_config(p->cmd);
+	if (use_pager == -1 && p->option & USE_PAGER)
+		use_pager = 1;
+	if (run_setup && startup_info->have_repository)
+		/* get_git_dir() may set up repo, avoid that */
+		trace_repo_setup(prefix);
 	commit_pager_choice();
 
 	if (!help && get_super_prefix()) {
@@ -484,14 +489,14 @@ static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
 static struct cmd_struct commands[] = {
 	{ "add", cmd_add, RUN_SETUP | NEED_WORK_TREE },
 	{ "am", cmd_am, RUN_SETUP | NEED_WORK_TREE },
-	{ "annotate", cmd_annotate, RUN_SETUP | NO_PARSEOPT },
+	{ "annotate", cmd_annotate, RUN_SETUP },
 	{ "apply", cmd_apply, RUN_SETUP_GENTLY },
 	{ "archive", cmd_archive, RUN_SETUP_GENTLY },
 	{ "bisect--helper", cmd_bisect__helper, RUN_SETUP },
 	{ "blame", cmd_blame, RUN_SETUP },
 	{ "branch", cmd_branch, RUN_SETUP | DELAY_PAGER_CONFIG },
 	{ "bugreport", cmd_bugreport, RUN_SETUP_GENTLY },
-	{ "bundle", cmd_bundle, RUN_SETUP_GENTLY | NO_PARSEOPT },
+	{ "bundle", cmd_bundle, RUN_SETUP_GENTLY },
 	{ "cat-file", cmd_cat_file, RUN_SETUP },
 	{ "check-attr", cmd_check_attr, RUN_SETUP },
 	{ "check-ignore", cmd_check_ignore, RUN_SETUP | NEED_WORK_TREE },
@@ -509,7 +514,7 @@ static struct cmd_struct commands[] = {
 	{ "column", cmd_column, RUN_SETUP_GENTLY },
 	{ "commit", cmd_commit, RUN_SETUP | NEED_WORK_TREE },
 	{ "commit-graph", cmd_commit_graph, RUN_SETUP },
-	{ "commit-tree", cmd_commit_tree, RUN_SETUP | NO_PARSEOPT },
+	{ "commit-tree", cmd_commit_tree, RUN_SETUP },
 	{ "config", cmd_config, RUN_SETUP_GENTLY | DELAY_PAGER_CONFIG },
 	{ "count-objects", cmd_count_objects, RUN_SETUP },
 	{ "credential", cmd_credential, RUN_SETUP_GENTLY | NO_PARSEOPT },
@@ -517,6 +522,7 @@ static struct cmd_struct commands[] = {
 	{ "credential-cache--daemon", cmd_credential_cache_daemon },
 	{ "credential-store", cmd_credential_store },
 	{ "describe", cmd_describe, RUN_SETUP },
+	{ "diagnose", cmd_diagnose, RUN_SETUP_GENTLY },
 	{ "diff", cmd_diff, NO_PARSEOPT },
 	{ "diff-files", cmd_diff_files, RUN_SETUP | NEED_WORK_TREE | NO_PARSEOPT },
 	{ "diff-index", cmd_diff_index, RUN_SETUP | NO_PARSEOPT },
@@ -533,11 +539,13 @@ static struct cmd_struct commands[] = {
 	{ "format-patch", cmd_format_patch, RUN_SETUP },
 	{ "fsck", cmd_fsck, RUN_SETUP },
 	{ "fsck-objects", cmd_fsck, RUN_SETUP },
+	{ "fsmonitor--daemon", cmd_fsmonitor__daemon, SUPPORT_SUPER_PREFIX | RUN_SETUP },
 	{ "gc", cmd_gc, RUN_SETUP },
 	{ "get-tar-commit-id", cmd_get_tar_commit_id, NO_PARSEOPT },
 	{ "grep", cmd_grep, RUN_SETUP_GENTLY },
 	{ "hash-object", cmd_hash_object },
 	{ "help", cmd_help },
+	{ "hook", cmd_hook, RUN_SETUP },
 	{ "index-pack", cmd_index_pack, RUN_SETUP_GENTLY | NO_PARSEOPT },
 	{ "init", cmd_init_db },
 	{ "init-db", cmd_init_db },
@@ -546,9 +554,9 @@ static struct cmd_struct commands[] = {
 	{ "ls-files", cmd_ls_files, RUN_SETUP },
 	{ "ls-remote", cmd_ls_remote, RUN_SETUP_GENTLY },
 	{ "ls-tree", cmd_ls_tree, RUN_SETUP },
-	{ "mailinfo", cmd_mailinfo, RUN_SETUP_GENTLY | NO_PARSEOPT },
+	{ "mailinfo", cmd_mailinfo, RUN_SETUP_GENTLY },
 	{ "mailsplit", cmd_mailsplit, NO_PARSEOPT },
-	{ "maintenance", cmd_maintenance, RUN_SETUP | NO_PARSEOPT },
+	{ "maintenance", cmd_maintenance, RUN_SETUP },
 	{ "merge", cmd_merge, RUN_SETUP | NEED_WORK_TREE },
 	{ "merge-base", cmd_merge_base, RUN_SETUP },
 	{ "merge-file", cmd_merge_file, RUN_SETUP_GENTLY },
@@ -558,10 +566,10 @@ static struct cmd_struct commands[] = {
 	{ "merge-recursive-ours", cmd_merge_recursive, RUN_SETUP | NEED_WORK_TREE | NO_PARSEOPT },
 	{ "merge-recursive-theirs", cmd_merge_recursive, RUN_SETUP | NEED_WORK_TREE | NO_PARSEOPT },
 	{ "merge-subtree", cmd_merge_recursive, RUN_SETUP | NEED_WORK_TREE | NO_PARSEOPT },
-	{ "merge-tree", cmd_merge_tree, RUN_SETUP | NO_PARSEOPT },
-	{ "mktag", cmd_mktag, RUN_SETUP | NO_PARSEOPT },
+	{ "merge-tree", cmd_merge_tree, RUN_SETUP },
+	{ "mktag", cmd_mktag, RUN_SETUP },
 	{ "mktree", cmd_mktree, RUN_SETUP },
-	{ "multi-pack-index", cmd_multi_pack_index, RUN_SETUP_GENTLY },
+	{ "multi-pack-index", cmd_multi_pack_index, RUN_SETUP },
 	{ "mv", cmd_mv, RUN_SETUP | NEED_WORK_TREE },
 	{ "name-rev", cmd_name_rev, RUN_SETUP },
 	{ "notes", cmd_notes, RUN_SETUP },
@@ -577,7 +585,6 @@ static struct cmd_struct commands[] = {
 	{ "range-diff", cmd_range_diff, RUN_SETUP | USE_PAGER },
 	{ "read-tree", cmd_read_tree, RUN_SETUP | SUPPORT_SUPER_PREFIX},
 	{ "rebase", cmd_rebase, RUN_SETUP | NEED_WORK_TREE },
-	{ "rebase--interactive", cmd_rebase__interactive, RUN_SETUP | NEED_WORK_TREE },
 	{ "receive-pack", cmd_receive_pack },
 	{ "reflog", cmd_reflog, RUN_SETUP },
 	{ "remote", cmd_remote, RUN_SETUP },
@@ -621,7 +628,7 @@ static struct cmd_struct commands[] = {
 	{ "verify-tag", cmd_verify_tag, RUN_SETUP },
 	{ "version", cmd_version },
 	{ "whatchanged", cmd_whatchanged, RUN_SETUP },
-	{ "worktree", cmd_worktree, RUN_SETUP | NO_PARSEOPT },
+	{ "worktree", cmd_worktree, RUN_SETUP },
 	{ "write-tree", cmd_write_tree, RUN_SETUP },
 };
 
@@ -888,8 +895,10 @@ int cmd_main(int argc, const char **argv)
 	argc--;
 	handle_options(&argv, &argc, NULL);
 	if (argc > 0) {
-		/* translate --help and --version into commands */
-		skip_prefix(argv[0], "--", &argv[0]);
+		if (!strcmp("--version", argv[0]) || !strcmp("-v", argv[0]))
+			argv[0] = "version";
+		else if (!strcmp("--help", argv[0]) || !strcmp("-h", argv[0]))
+			argv[0] = "help";
 	} else {
 		/* The user didn't specify a command; give them help */
 		commit_pager_choice();

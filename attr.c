@@ -61,10 +61,10 @@ struct attr_hash_entry {
 };
 
 /* attr_hashmap comparison function */
-static int attr_hash_entry_cmp(const void *unused_cmp_data,
+static int attr_hash_entry_cmp(const void *cmp_data UNUSED,
 			       const struct hashmap_entry *eptr,
 			       const struct hashmap_entry *entry_or_key,
-			       const void *unused_keydata)
+			       const void *keydata UNUSED)
 {
 	const struct attr_hash_entry *a, *b;
 
@@ -79,7 +79,7 @@ static int attr_hash_entry_cmp(const void *unused_cmp_data,
  * Access to this dictionary must be surrounded with a mutex.
  */
 static struct attr_hashmap g_attr_hashmap = {
-	HASHMAP_INIT(attr_hash_entry_cmp, NULL)
+	.map = HASHMAP_INIT(attr_hash_entry_cmp, NULL),
 };
 
 /*
@@ -744,6 +744,20 @@ static struct attr_stack *read_attr_from_index(struct index_state *istate,
 	if (!istate)
 		return NULL;
 
+	/*
+	 * The .gitattributes file only applies to files within its
+	 * parent directory. In the case of cone-mode sparse-checkout,
+	 * the .gitattributes file is sparse if and only if all paths
+	 * within that directory are also sparse. Thus, don't load the
+	 * .gitattributes file since it will not matter.
+	 *
+	 * In the case of a sparse index, it is critical that we don't go
+	 * looking for a .gitattributes file, as doing so would cause the
+	 * index to expand.
+	 */
+	if (!path_in_cone_mode_sparse_checkout(path, istate))
+		return NULL;
+
 	buf = read_blob_data_from_index(istate, path, NULL);
 	if (!buf)
 		return NULL;
@@ -1009,7 +1023,7 @@ static int path_matches(const char *pathname, int pathlen,
 	}
 	return match_pathname(pathname, pathlen - isdir,
 			      base, baselen,
-			      pattern, prefix, pat->patternlen, pat->flags);
+			      pattern, prefix, pat->patternlen);
 }
 
 static int macroexpand_one(struct all_attrs_item *all_attrs, int nr, int rem);

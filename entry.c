@@ -82,11 +82,13 @@ static int create_file(const char *path, unsigned int mode)
 	return open(path, O_WRONLY | O_CREAT | O_EXCL, mode);
 }
 
-void *read_blob_entry(const struct cache_entry *ce, unsigned long *size)
+void *read_blob_entry(const struct cache_entry *ce, size_t *size)
 {
 	enum object_type type;
-	void *blob_data = read_object_file(&ce->oid, &type, size);
+	unsigned long ul;
+	void *blob_data = read_object_file(&ce->oid, &type, &ul);
 
+	*size = ul;
 	if (blob_data) {
 		if (type == OBJ_BLOB)
 			return blob_data;
@@ -155,29 +157,28 @@ static int remove_available_paths(struct string_list_item *item, void *cb_data)
 
 	available = string_list_lookup(available_paths, item->string);
 	if (available)
-		available->util = (void *)item->string;
+		available->util = item->util;
 	return !available;
 }
 
-int finish_delayed_checkout(struct checkout *state, int *nr_checkouts)
+int finish_delayed_checkout(struct checkout *state, int show_progress)
 {
 	int errs = 0;
-	unsigned delayed_object_count;
+	unsigned processed_paths = 0;
 	off_t filtered_bytes = 0;
 	struct string_list_item *filter, *path;
-	struct progress *progress;
+	struct progress *progress = NULL;
 	struct delayed_checkout *dco = state->delayed_checkout;
 
 	if (!state->delayed_checkout)
 		return errs;
 
 	dco->state = CE_RETRY;
-	delayed_object_count = dco->paths.nr;
-	progress = start_delayed_progress(_("Filtering content"), delayed_object_count);
+	if (show_progress)
+		progress = start_delayed_progress(_("Filtering content"), dco->paths.nr);
 	while (dco->filters.nr > 0) {
 		for_each_string_list_item(filter, &dco->filters) {
 			struct string_list available_paths = STRING_LIST_INIT_NODUP;
-			display_progress(progress, delayed_object_count - dco->paths.nr);
 
 			if (!async_query_available_blobs(filter->string, &available_paths)) {
 				/* Filter reported an error */
@@ -224,7 +225,8 @@ int finish_delayed_checkout(struct checkout *state, int *nr_checkouts)
 				ce = index_file_exists(state->istate, path->string,
 						       strlen(path->string), 0);
 				if (ce) {
-					errs |= checkout_entry(ce, state, NULL, nr_checkouts);
+					display_progress(progress, ++processed_paths);
+					errs |= checkout_entry(ce, state, NULL, path->util);
 					filtered_bytes += ce->ce_stat_data.sd_size;
 					display_throughput(progress, filtered_bytes);
 				} else
@@ -263,19 +265,21 @@ void update_ce_after_write(const struct checkout *state, struct cache_entry *ce,
 
 /* Note: ca is used (and required) iff the entry refers to a regular file. */
 static int write_entry(struct cache_entry *ce, char *path, struct conv_attrs *ca,
-		       const struct checkout *state, int to_tempfile)
+		       const struct checkout *state, int to_tempfile,
+		       int *nr_checkouts)
 {
 	unsigned int ce_mode_s_ifmt = ce->ce_mode & S_IFMT;
 	struct delayed_checkout *dco = state->delayed_checkout;
 	int fd, ret, fstat_done = 0;
 	char *new_blob;
 	struct strbuf buf = STRBUF_INIT;
-	unsigned long size;
+	size_t size;
 	ssize_t wrote;
 	size_t newsize = 0;
 	struct stat st;
 	const struct submodule *sub;
 	struct checkout_metadata meta;
+	static int scratch_nr_checkouts;
 
 	clone_checkout_metadata(&meta, &state->meta, &ce->oid);
 
@@ -330,9 +334,15 @@ static int write_entry(struct cache_entry *ce, char *path, struct conv_attrs *ca
 			ret = async_convert_to_working_tree_ca(ca, ce->name,
 							       new_blob, size,
 							       &buf, &meta, dco);
-			if (ret && string_list_has_string(&dco->paths, ce->name)) {
-				free(new_blob);
-				goto delayed;
+			if (ret) {
+				struct string_list_item *item =
+					string_list_lookup(&dco->paths, ce->name);
+				if (item) {
+					item->util = nr_checkouts ? nr_checkouts
+							: &scratch_nr_checkouts;
+					free(new_blob);
+					goto delayed;
+				}
 			}
 		} else {
 			ret = convert_to_working_tree_ca(ca, ce->name, new_blob,
@@ -389,6 +399,8 @@ finish:
 					   ce->name);
 		update_ce_after_write(state, ce , &st);
 	}
+	if (nr_checkouts)
+		(*nr_checkouts)++;
 delayed:
 	return 0;
 }
@@ -473,7 +485,7 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 			convert_attrs(state->istate, &ca_buf, ce->name);
 			ca = &ca_buf;
 		}
-		return write_entry(ce, topath, ca, state, 1);
+		return write_entry(ce, topath, ca, state, 1, nr_checkouts);
 	}
 
 	strbuf_reset(&path);
@@ -537,18 +549,15 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 
 	create_directories(path.buf, path.len, state);
 
-	if (nr_checkouts)
-		(*nr_checkouts)++;
-
 	if (S_ISREG(ce->ce_mode) && !ca) {
 		convert_attrs(state->istate, &ca_buf, ce->name);
 		ca = &ca_buf;
 	}
 
-	if (!enqueue_checkout(ce, ca))
+	if (!enqueue_checkout(ce, ca, nr_checkouts))
 		return 0;
 
-	return write_entry(ce, path.buf, ca, state, 0);
+	return write_entry(ce, path.buf, ca, state, 0, nr_checkouts);
 }
 
 void unlink_entry(const struct cache_entry *ce)

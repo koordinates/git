@@ -84,6 +84,8 @@ static int pack_objects(int fd, struct ref *refs, struct oid_array *advertised,
 		strvec_push(&po.args, "--progress");
 	if (is_repository_shallow(the_repository))
 		strvec_push(&po.args, "--shallow");
+	if (args->disable_bitmaps)
+		strvec_push(&po.args, "--no-use-bitmap-index");
 	po.in = -1;
 	po.out = args->stateless_rpc ? -1 : fd;
 	po.git_cmd = 1;
@@ -264,7 +266,7 @@ static int receive_status(struct packet_reader *reader, struct ref *refs)
 	return ret;
 }
 
-static int sideband_demux(int in, int out, void *data)
+static int sideband_demux(int in UNUSED, int out, void *data)
 {
 	int *fd = data, ret;
 	if (async_with_fork())
@@ -341,13 +343,13 @@ static int generate_push_cert(struct strbuf *req_buf,
 {
 	const struct ref *ref;
 	struct string_list_item *item;
-	char *signing_key = xstrdup(get_signing_key());
+	char *signing_key_id = xstrdup(get_signing_key_id());
 	const char *cp, *np;
 	struct strbuf cert = STRBUF_INIT;
 	int update_seen = 0;
 
 	strbuf_addstr(&cert, "certificate version 0.1\n");
-	strbuf_addf(&cert, "pusher %s ", signing_key);
+	strbuf_addf(&cert, "pusher %s ", signing_key_id);
 	datestamp(&cert);
 	strbuf_addch(&cert, '\n');
 	if (args->url && *args->url) {
@@ -374,7 +376,7 @@ static int generate_push_cert(struct strbuf *req_buf,
 	if (!update_seen)
 		goto free_return;
 
-	if (sign_buffer(&cert, &cert, signing_key))
+	if (sign_buffer(&cert, &cert, get_signing_key()))
 		die(_("failed to sign the push certificate"));
 
 	packet_buf_write(req_buf, "push-cert%c%s", 0, cap_string);
@@ -386,7 +388,7 @@ static int generate_push_cert(struct strbuf *req_buf,
 	packet_buf_write(req_buf, "push-cert-end\n");
 
 free_return:
-	free(signing_key);
+	free(signing_key_id);
 	strbuf_release(&cert);
 	return update_seen;
 }
@@ -487,6 +489,7 @@ int send_pack(struct send_pack_args *args,
 	struct async demux;
 	const char *push_cert_nonce = NULL;
 	struct packet_reader reader;
+	int use_bitmaps;
 
 	if (!remote_refs) {
 		fprintf(stderr, "No refs in common and none specified; doing nothing.\n"
@@ -497,6 +500,9 @@ int send_pack(struct send_pack_args *args,
 	git_config_get_bool("push.negotiate", &push_negotiate);
 	if (push_negotiate)
 		get_commons_through_negotiation(args->url, remote_refs, &commons);
+
+	if (!git_config_get_bool("push.usebitmaps", &use_bitmaps))
+		args->disable_bitmaps = !use_bitmaps;
 
 	git_config_get_bool("transfer.advertisesid", &advertise_sid);
 

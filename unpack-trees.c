@@ -11,6 +11,7 @@
 #include "refs.h"
 #include "attr.h"
 #include "split-index.h"
+#include "sparse-index.h"
 #include "submodule.h"
 #include "submodule-config.h"
 #include "fsmonitor.h"
@@ -18,6 +19,7 @@
 #include "promisor-remote.h"
 #include "entry.h"
 #include "parallel-checkout.h"
+#include "sparse-index.h"
 
 /*
  * Error messages expected by scripts out of plumbing commands such as
@@ -35,6 +37,9 @@ static const char *unpack_plumbing_errors[NB_UNPACK_TREES_WARNING_TYPES] = {
 
 	/* ERROR_NOT_UPTODATE_DIR */
 	"Updating '%s' would lose untracked files in it",
+
+	/* ERROR_CWD_IN_THE_WAY */
+	"Refusing to remove '%s' since it is the current working directory.",
 
 	/* ERROR_WOULD_LOSE_UNTRACKED_OVERWRITTEN */
 	"Untracked working tree file '%s' would be overwritten by merge.",
@@ -111,17 +116,17 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 	strvec_init(&opts->msgs_to_free);
 
 	if (!strcmp(cmd, "checkout"))
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("Your local changes to the following files would be overwritten by checkout:\n%%s"
 			  "Please commit your changes or stash them before you switch branches.")
 		      : _("Your local changes to the following files would be overwritten by checkout:\n%%s");
 	else if (!strcmp(cmd, "merge"))
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("Your local changes to the following files would be overwritten by merge:\n%%s"
 			  "Please commit your changes or stash them before you merge.")
 		      : _("Your local changes to the following files would be overwritten by merge:\n%%s");
 	else
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("Your local changes to the following files would be overwritten by %s:\n%%s"
 			  "Please commit your changes or stash them before you %s.")
 		      : _("Your local changes to the following files would be overwritten by %s:\n%%s");
@@ -131,18 +136,21 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 	msgs[ERROR_NOT_UPTODATE_DIR] =
 		_("Updating the following directories would lose untracked files in them:\n%s");
 
+	msgs[ERROR_CWD_IN_THE_WAY] =
+		_("Refusing to remove the current working directory:\n%s");
+
 	if (!strcmp(cmd, "checkout"))
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("The following untracked working tree files would be removed by checkout:\n%%s"
 			  "Please move or remove them before you switch branches.")
 		      : _("The following untracked working tree files would be removed by checkout:\n%%s");
 	else if (!strcmp(cmd, "merge"))
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("The following untracked working tree files would be removed by merge:\n%%s"
 			  "Please move or remove them before you merge.")
 		      : _("The following untracked working tree files would be removed by merge:\n%%s");
 	else
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("The following untracked working tree files would be removed by %s:\n%%s"
 			  "Please move or remove them before you %s.")
 		      : _("The following untracked working tree files would be removed by %s:\n%%s");
@@ -150,17 +158,17 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 		strvec_pushf(&opts->msgs_to_free, msg, cmd, cmd);
 
 	if (!strcmp(cmd, "checkout"))
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("The following untracked working tree files would be overwritten by checkout:\n%%s"
 			  "Please move or remove them before you switch branches.")
 		      : _("The following untracked working tree files would be overwritten by checkout:\n%%s");
 	else if (!strcmp(cmd, "merge"))
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("The following untracked working tree files would be overwritten by merge:\n%%s"
 			  "Please move or remove them before you merge.")
 		      : _("The following untracked working tree files would be overwritten by merge:\n%%s");
 	else
-		msg = advice_commit_before_merge
+		msg = advice_enabled(ADVICE_COMMIT_BEFORE_MERGE)
 		      ? _("The following untracked working tree files would be overwritten by %s:\n%%s"
 			  "Please move or remove them before you %s.")
 		      : _("The following untracked working tree files would be overwritten by %s:\n%%s");
@@ -479,7 +487,7 @@ static int check_updates(struct unpack_trees_options *o,
 		errs |= run_parallel_checkout(&state, pc_workers, pc_threshold,
 					      progress, &cnt);
 	stop_progress(&progress);
-	errs |= finish_delayed_checkout(&state, NULL);
+	errs |= finish_delayed_checkout(&state, o->verbose_update);
 	git_attr_set_direction(GIT_ATTR_CHECKIN);
 
 	if (o->clone)
@@ -588,13 +596,6 @@ static inline int call_unpack_fn(const struct cache_entry * const *src,
 static void mark_ce_used(struct cache_entry *ce, struct unpack_trees_options *o)
 {
 	ce->ce_flags |= CE_UNPACKED;
-
-	/*
-	 * If this is a sparse directory, don't advance cache_bottom.
-	 * That will be advanced later using the cache-tree data.
-	 */
-	if (S_ISSPARSEDIR(ce->ce_mode))
-		return;
 
 	if (o->cache_bottom < o->src_index->cache_nr &&
 	    o->src_index->cache[o->cache_bottom] == ce) {
@@ -1069,6 +1070,67 @@ static struct cache_entry *create_ce_entry(const struct traverse_info *info,
 }
 
 /*
+ * Determine whether the path specified by 'p' should be unpacked as a new
+ * sparse directory in a sparse index. A new sparse directory 'A/':
+ * - must be outside the sparse cone.
+ * - must not already be in the index (i.e., no index entry with name 'A/'
+ *   exists).
+ * - must not have any child entries in the index (i.e., no index entry
+ *   'A/<something>' exists).
+ * If 'p' meets the above requirements, return 1; otherwise, return 0.
+ */
+static int entry_is_new_sparse_dir(const struct traverse_info *info,
+				   const struct name_entry *p)
+{
+	int res, pos;
+	struct strbuf dirpath = STRBUF_INIT;
+	struct unpack_trees_options *o = info->data;
+
+	if (!S_ISDIR(p->mode))
+		return 0;
+
+	/*
+	 * If the path is inside the sparse cone, it can't be a sparse directory.
+	 */
+	strbuf_add(&dirpath, info->traverse_path, info->pathlen);
+	strbuf_add(&dirpath, p->path, p->pathlen);
+	strbuf_addch(&dirpath, '/');
+	if (path_in_cone_mode_sparse_checkout(dirpath.buf, o->src_index)) {
+		res = 0;
+		goto cleanup;
+	}
+
+	pos = index_name_pos_sparse(o->src_index, dirpath.buf, dirpath.len);
+	if (pos >= 0) {
+		/* Path is already in the index, not a new sparse dir */
+		res = 0;
+		goto cleanup;
+	}
+
+	/* Where would this sparse dir be inserted into the index? */
+	pos = -pos - 1;
+	if (pos >= o->src_index->cache_nr) {
+		/*
+		 * Sparse dir would be inserted at the end of the index, so we
+		 * know it has no child entries.
+		 */
+		res = 1;
+		goto cleanup;
+	}
+
+	/*
+	 * If the dir has child entries in the index, the first would be at the
+	 * position the sparse directory would be inserted. If the entry at this
+	 * position is inside the dir, not a new sparse dir.
+	 */
+	res = strncmp(o->src_index->cache[pos]->name, dirpath.buf, dirpath.len);
+
+cleanup:
+	strbuf_release(&dirpath);
+	return res;
+}
+
+/*
  * Note that traverse_by_cache_tree() duplicates some logic in this function
  * without actually calling it. If you change the logic here you may need to
  * check and change there as well.
@@ -1077,21 +1139,44 @@ static int unpack_single_entry(int n, unsigned long mask,
 			       unsigned long dirmask,
 			       struct cache_entry **src,
 			       const struct name_entry *names,
-			       const struct traverse_info *info)
+			       const struct traverse_info *info,
+			       int *is_new_sparse_dir)
 {
 	int i;
 	struct unpack_trees_options *o = info->data;
 	unsigned long conflicts = info->df_conflicts | dirmask;
+	const struct name_entry *p = names;
 
-	if (mask == dirmask && !src[0])
-		return 0;
+	*is_new_sparse_dir = 0;
+	if (mask == dirmask && !src[0]) {
+		/*
+		 * If we're not in a sparse index, we can't unpack a directory
+		 * without recursing into it, so we return.
+		 */
+		if (!o->src_index->sparse_index)
+			return 0;
+
+		/* Find first entry with a real name (we could use "mask" too) */
+		while (!p->mode)
+			p++;
+
+		/*
+		 * If the directory is completely missing from the index but
+		 * would otherwise be a sparse directory, we should unpack it.
+		 * If not, we'll return and continue recursively traversing the
+		 * tree.
+		 */
+		*is_new_sparse_dir = entry_is_new_sparse_dir(info, p);
+		if (!*is_new_sparse_dir)
+			return 0;
+	}
 
 	/*
-	 * When we have a sparse directory entry for src[0],
-	 * then this isn't necessarily a directory-file conflict.
+	 * When we are unpacking a sparse directory, then this isn't necessarily
+	 * a directory-file conflict.
 	 */
-	if (mask == dirmask && src[0] &&
-	    S_ISSPARSEDIR(src[0]->ce_mode))
+	if (mask == dirmask &&
+	    (*is_new_sparse_dir || (src[0] && S_ISSPARSEDIR(src[0]->ce_mode))))
 		conflicts = 0;
 
 	/*
@@ -1231,7 +1316,9 @@ static int find_cache_pos(struct traverse_info *info,
 
 /*
  * Given a sparse directory entry 'ce', compare ce->name to
- * info->name + '/' + p->path + '/' if info->name is non-empty.
+ * info->traverse_path + p->path + '/' if info->traverse_path
+ * is non-empty.
+ *
  * Compare ce->name to p->path + '/' otherwise. Note that
  * ce->name must end in a trailing '/' because it is a sparse
  * directory entry.
@@ -1243,11 +1330,11 @@ static int sparse_dir_matches_path(const struct cache_entry *ce,
 	assert(S_ISSPARSEDIR(ce->ce_mode));
 	assert(ce->name[ce->ce_namelen - 1] == '/');
 
-	if (info->namelen)
-		return ce->ce_namelen == info->namelen + p->pathlen + 2 &&
-		       ce->name[info->namelen] == '/' &&
-		       !strncmp(ce->name, info->name, info->namelen) &&
-		       !strncmp(ce->name + info->namelen + 1, p->path, p->pathlen);
+	if (info->pathlen)
+		return ce->ce_namelen == info->pathlen + p->pathlen + 1 &&
+		       ce->name[info->pathlen - 1] == '/' &&
+		       !strncmp(ce->name, info->traverse_path, info->pathlen) &&
+		       !strncmp(ce->name + info->pathlen, p->path, p->pathlen);
 	return ce->ce_namelen == p->pathlen + 1 &&
 	       !strncmp(ce->name, p->path, p->pathlen);
 }
@@ -1255,7 +1342,7 @@ static int sparse_dir_matches_path(const struct cache_entry *ce,
 static struct cache_entry *find_cache_entry(struct traverse_info *info,
 					    const struct name_entry *p)
 {
-	struct cache_entry *ce;
+	const char *path;
 	int pos = find_cache_pos(info, p->path, p->pathlen);
 	struct unpack_trees_options *o = info->data;
 
@@ -1281,9 +1368,11 @@ static struct cache_entry *find_cache_entry(struct traverse_info *info,
 	 * paths (e.g. "subdir-").
 	 */
 	while (pos >= 0) {
-		ce = o->src_index->cache[pos];
+		struct cache_entry *ce = o->src_index->cache[pos];
 
-		if (strncmp(ce->name, p->path, p->pathlen))
+		if (!skip_prefix(ce->name, info->traverse_path, &path) ||
+		    strncmp(path, p->path, p->pathlen) ||
+		    path[p->pathlen] != '/')
 			return NULL;
 
 		if (S_ISSPARSEDIR(ce->ce_mode) &&
@@ -1334,13 +1423,49 @@ static void debug_unpack_callback(int n,
  * from the tree walk at the given traverse_info.
  */
 static int is_sparse_directory_entry(struct cache_entry *ce,
-				     struct name_entry *name,
+				     const struct name_entry *name,
 				     struct traverse_info *info)
 {
 	if (!ce || !name || !S_ISSPARSEDIR(ce->ce_mode))
 		return 0;
 
 	return sparse_dir_matches_path(ce, info, name);
+}
+
+static int unpack_sparse_callback(int n, unsigned long mask, unsigned long dirmask, struct name_entry *names, struct traverse_info *info)
+{
+	struct cache_entry *src[MAX_UNPACK_TREES + 1] = { NULL, };
+	struct unpack_trees_options *o = info->data;
+	int ret, is_new_sparse_dir;
+
+	assert(o->merge);
+
+	/*
+	 * Unlike in 'unpack_callback', where src[0] is derived from the index when
+	 * merging, src[0] is a transient cache entry derived from the first tree
+	 * provided. Create the temporary entry as if it came from a non-sparse index.
+	 */
+	if (!is_null_oid(&names[0].oid)) {
+		src[0] = create_ce_entry(info, &names[0], 0,
+					&o->result, 1,
+					dirmask & (1ul << 0));
+		src[0]->ce_flags |= (CE_SKIP_WORKTREE | CE_NEW_SKIP_WORKTREE);
+	}
+
+	/*
+	 * 'unpack_single_entry' assumes that src[0] is derived directly from
+	 * the index, rather than from an entry in 'names'. This is *not* true when
+	 * merging a sparse directory, in which case names[0] is the "index" source
+	 * entry. To match the expectations of 'unpack_single_entry', shift past the
+	 * "index" tree (i.e., names[0]) and adjust 'names', 'n', 'mask', and
+	 * 'dirmask' accordingly.
+	 */
+	ret = unpack_single_entry(n - 1, mask >> 1, dirmask >> 1, src, names + 1, info, &is_new_sparse_dir);
+
+	if (src[0])
+		discard_cache_entry(src[0]);
+
+	return ret >= 0 ? mask : -1;
 }
 
 /*
@@ -1353,6 +1478,7 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 	struct cache_entry *src[MAX_UNPACK_TREES + 1] = { NULL, };
 	struct unpack_trees_options *o = info->data;
 	const struct name_entry *p = names;
+	int is_new_sparse_dir;
 
 	/* Find first entry with a real name (we could use "mask" too) */
 	while (!p->mode)
@@ -1399,7 +1525,7 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 		}
 	}
 
-	if (unpack_single_entry(n, mask, dirmask, src, names, info) < 0)
+	if (unpack_single_entry(n, mask, dirmask, src, names, info, &is_new_sparse_dir))
 		return -1;
 
 	if (o->merge && src[0]) {
@@ -1424,12 +1550,20 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 			 * it does not do any look-ahead, so this is safe.
 			 */
 			if (matches) {
-				o->cache_bottom += matches;
+				/*
+				 * Only increment the cache_bottom if the
+				 * directory isn't a sparse directory index
+				 * entry (if it is, it was already incremented)
+				 * in 'mark_ce_used()'
+				 */
+				if (!src[0] || !S_ISSPARSEDIR(src[0]->ce_mode))
+					o->cache_bottom += matches;
 				return mask;
 			}
 		}
 
-		if (!is_sparse_directory_entry(src[0], names, info) &&
+		if (!is_sparse_directory_entry(src[0], p, info) &&
+		    !is_new_sparse_dir &&
 		    traverse_trees_recursive(n, dirmask, mask & ~dirmask,
 						    names, info) < 0) {
 			return -1;
@@ -1675,6 +1809,41 @@ static void populate_from_existing_patterns(struct unpack_trees_options *o,
 		o->pl = pl;
 }
 
+static void update_sparsity_for_prefix(const char *prefix,
+				       struct index_state *istate)
+{
+	int prefix_len = strlen(prefix);
+	struct strbuf ce_prefix = STRBUF_INIT;
+
+	if (!istate->sparse_index)
+		return;
+
+	while (prefix_len > 0 && prefix[prefix_len - 1] == '/')
+		prefix_len--;
+
+	if (prefix_len <= 0)
+		BUG("Invalid prefix passed to update_sparsity_for_prefix");
+
+	strbuf_grow(&ce_prefix, prefix_len + 1);
+	strbuf_add(&ce_prefix, prefix, prefix_len);
+	strbuf_addch(&ce_prefix, '/');
+
+	/*
+	 * If the prefix points to a sparse directory or a path inside a sparse
+	 * directory, the index should be expanded. This is accomplished in one
+	 * of two ways:
+	 * - if the prefix is inside a sparse directory, it will be expanded by
+	 *   the 'ensure_full_index(...)' call in 'index_name_pos(...)'.
+	 * - if the prefix matches an existing sparse directory entry,
+	 *   'index_name_pos(...)' will return its index position, triggering
+	 *   the 'ensure_full_index(...)' below.
+	 */
+	if (!path_in_cone_mode_sparse_checkout(ce_prefix.buf, istate) &&
+	    index_name_pos(istate, ce_prefix.buf, ce_prefix.len) >= 0)
+		ensure_full_index(istate);
+
+	strbuf_release(&ce_prefix);
+}
 
 static int verify_absent(const struct cache_entry *,
 			 enum unpack_trees_error_types,
@@ -1692,9 +1861,15 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	static struct cache_entry *dfc;
 	struct pattern_list pl;
 	int free_pattern_list = 0;
+	struct dir_struct dir = DIR_INIT;
+
+	if (o->reset == UNPACK_RESET_INVALID)
+		BUG("o->reset had a value of 1; should be UNPACK_TREES_*_UNTRACKED");
 
 	if (len > MAX_UNPACK_TREES)
 		die("unpack_trees takes at most %d trees", MAX_UNPACK_TREES);
+	if (o->dir)
+		BUG("o->dir is for internal use only");
 
 	trace_performance_enter();
 	trace2_region_enter("unpack_trees", "unpack_trees", the_repository);
@@ -1704,6 +1879,19 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		ensure_full_index(o->src_index);
 		ensure_full_index(o->dst_index);
 	}
+
+	if (o->reset == UNPACK_RESET_OVERWRITE_UNTRACKED &&
+	    o->preserve_ignored)
+		BUG("UNPACK_RESET_OVERWRITE_UNTRACKED incompatible with preserved ignored files");
+
+	if (!o->preserve_ignored) {
+		o->dir = &dir;
+		o->dir->flags |= DIR_SHOW_IGNORED;
+		setup_standard_excludes(o->dir);
+	}
+
+	if (o->prefix)
+		update_sparsity_for_prefix(o->prefix, o->src_index);
 
 	if (!core_apply_sparse_checkout || !o->update)
 		o->skip_sparse_checkout = 1;
@@ -1738,6 +1926,12 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 
 	o->result.fsmonitor_last_update =
 		xstrdup_or_null(o->src_index->fsmonitor_last_update);
+	o->result.fsmonitor_has_run_once = o->src_index->fsmonitor_has_run_once;
+
+	if (!o->src_index->initialized &&
+	    !repo->settings.command_requires_full_index &&
+	    is_sparse_index_allowed(&o->result, 0))
+		o->result.sparse_index = 1;
 
 	/*
 	 * Sparse checkout loop #1: set NEW_SKIP_WORKTREE on existing entries
@@ -1866,6 +2060,10 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 done:
 	if (free_pattern_list)
 		clear_pattern_list(&pl);
+	if (o->dir) {
+		dir_clear(o->dir);
+		o->dir = NULL;
+	}
 	trace2_region_leave("unpack_trees", "unpack_trees", the_repository);
 	trace_performance_leave("unpack_trees");
 	return ret;
@@ -1913,6 +2111,9 @@ enum update_sparsity_result update_sparsity(struct unpack_trees_options *o)
 		if (o->skip_sparse_checkout)
 			goto skip_sparse_checkout;
 	}
+
+	/* Expand sparse directories as needed */
+	expand_index(o->src_index, o->pl);
 
 	/* Set NEW_SKIP_WORKTREE on existing entries. */
 	mark_all_ce_unused(o->src_index);
@@ -2024,7 +2225,9 @@ static int verify_uptodate_1(const struct cache_entry *ce,
 int verify_uptodate(const struct cache_entry *ce,
 		    struct unpack_trees_options *o)
 {
-	if (!o->skip_sparse_checkout && (ce->ce_flags & CE_NEW_SKIP_WORKTREE))
+	if (!o->skip_sparse_checkout &&
+	    (ce->ce_flags & CE_SKIP_WORKTREE) &&
+	    (ce->ce_flags & CE_NEW_SKIP_WORKTREE))
 		return 0;
 	return verify_uptodate_1(ce, o, ERROR_NOT_UPTODATE_FILE);
 }
@@ -2124,19 +2327,23 @@ static int verify_clean_subdirectory(const struct cache_entry *ce,
 		cnt++;
 	}
 
-	/*
-	 * Then we need to make sure that we do not lose a locally
-	 * present file that is not ignored.
-	 */
+	/* Do not lose a locally present file that is not ignored. */
 	pathbuf = xstrfmt("%.*s/", namelen, ce->name);
 
 	memset(&d, 0, sizeof(d));
 	if (o->dir)
 		d.exclude_per_dir = o->dir->exclude_per_dir;
 	i = read_directory(&d, o->src_index, pathbuf, namelen+1, NULL);
+	dir_clear(&d);
+	free(pathbuf);
 	if (i)
 		return add_rejected_path(o, ERROR_NOT_UPTODATE_DIR, ce->name);
-	free(pathbuf);
+
+	/* Do not lose startup_info->original_cwd */
+	if (startup_info->original_cwd &&
+	    !strcmp(startup_info->original_cwd, ce->name))
+		return add_rejected_path(o, ERROR_CWD_IN_THE_WAY, ce->name);
+
 	return cnt;
 }
 
@@ -2156,9 +2363,15 @@ static int icase_exists(struct unpack_trees_options *o, const char *name, int le
 	return src && !ie_match_stat(o->src_index, src, st, CE_MATCH_IGNORE_VALID|CE_MATCH_IGNORE_SKIP_WORKTREE);
 }
 
+enum absent_checking_type {
+	COMPLETELY_ABSENT,
+	ABSENT_ANY_DIRECTORY
+};
+
 static int check_ok_to_remove(const char *name, int len, int dtype,
 			      const struct cache_entry *ce, struct stat *st,
 			      enum unpack_trees_error_types error_type,
+			      enum absent_checking_type absent_type,
 			      struct unpack_trees_options *o)
 {
 	const struct cache_entry *result;
@@ -2193,6 +2406,10 @@ static int check_ok_to_remove(const char *name, int len, int dtype,
 		return 0;
 	}
 
+	/* If we only care about directories, then we can remove */
+	if (absent_type == ABSENT_ANY_DIRECTORY)
+		return 0;
+
 	/*
 	 * The previous round may already have decided to
 	 * delete this path, which is in a subdirectory that
@@ -2213,13 +2430,24 @@ static int check_ok_to_remove(const char *name, int len, int dtype,
  */
 static int verify_absent_1(const struct cache_entry *ce,
 			   enum unpack_trees_error_types error_type,
+			   enum absent_checking_type absent_type,
 			   struct unpack_trees_options *o)
 {
 	int len;
 	struct stat st;
 
-	if (o->index_only || o->reset || !o->update)
+	if (o->index_only || !o->update)
 		return 0;
+
+	if (o->reset == UNPACK_RESET_OVERWRITE_UNTRACKED) {
+		/* Avoid nuking startup_info->original_cwd... */
+		if (startup_info->original_cwd &&
+		    !strcmp(startup_info->original_cwd, ce->name))
+			return add_rejected_path(o, ERROR_CWD_IN_THE_WAY,
+						 ce->name);
+		/* ...but nuke anything else. */
+		return 0;
+	}
 
 	len = check_leading_path(ce->name, ce_namelen(ce), 0);
 	if (!len)
@@ -2238,7 +2466,8 @@ static int verify_absent_1(const struct cache_entry *ce,
 								NULL, o);
 			else
 				ret = check_ok_to_remove(path, len, DT_UNKNOWN, NULL,
-							 &st, error_type, o);
+							 &st, error_type,
+							 absent_type, o);
 		}
 		free(path);
 		return ret;
@@ -2253,7 +2482,7 @@ static int verify_absent_1(const struct cache_entry *ce,
 
 		return check_ok_to_remove(ce->name, ce_namelen(ce),
 					  ce_to_dtype(ce), ce, &st,
-					  error_type, o);
+					  error_type, absent_type, o);
 	}
 }
 
@@ -2263,14 +2492,23 @@ static int verify_absent(const struct cache_entry *ce,
 {
 	if (!o->skip_sparse_checkout && (ce->ce_flags & CE_NEW_SKIP_WORKTREE))
 		return 0;
-	return verify_absent_1(ce, error_type, o);
+	return verify_absent_1(ce, error_type, COMPLETELY_ABSENT, o);
+}
+
+static int verify_absent_if_directory(const struct cache_entry *ce,
+				      enum unpack_trees_error_types error_type,
+				      struct unpack_trees_options *o)
+{
+	if (!o->skip_sparse_checkout && (ce->ce_flags & CE_NEW_SKIP_WORKTREE))
+		return 0;
+	return verify_absent_1(ce, error_type, ABSENT_ANY_DIRECTORY, o);
 }
 
 static int verify_absent_sparse(const struct cache_entry *ce,
 				enum unpack_trees_error_types error_type,
 				struct unpack_trees_options *o)
 {
-	return verify_absent_1(ce, error_type, o);
+	return verify_absent_1(ce, error_type, COMPLETELY_ABSENT, o);
 }
 
 static int merged_entry(const struct cache_entry *ce,
@@ -2344,12 +2582,49 @@ static int merged_entry(const struct cache_entry *ce,
 		 * Previously unmerged entry left as an existence
 		 * marker by read_index_unmerged();
 		 */
+		if (verify_absent_if_directory(merge,
+				  ERROR_WOULD_LOSE_UNTRACKED_OVERWRITTEN, o)) {
+			discard_cache_entry(merge);
+			return -1;
+		}
+
 		invalidate_ce_path(old, o);
 	}
 
 	if (do_add_entry(o, merge, update, CE_STAGEMASK) < 0)
 		return -1;
 	return 1;
+}
+
+static int merged_sparse_dir(const struct cache_entry * const *src, int n,
+			     struct unpack_trees_options *o)
+{
+	struct tree_desc t[MAX_UNPACK_TREES + 1];
+	void * tree_bufs[MAX_UNPACK_TREES + 1];
+	struct traverse_info info;
+	int i, ret;
+
+	/*
+	 * Create the tree traversal information for traversing into *only* the
+	 * sparse directory.
+	 */
+	setup_traverse_info(&info, src[0]->name);
+	info.fn = unpack_sparse_callback;
+	info.data = o;
+	info.show_all_errors = o->show_all_errors;
+	info.pathspec = o->pathspec;
+
+	/* Get the tree descriptors of the sparse directory in each of the merging trees */
+	for (i = 0; i < n; i++)
+		tree_bufs[i] = fill_tree_descriptor(o->src_index->repo, &t[i],
+						    src[i] && !is_null_oid(&src[i]->oid) ? &src[i]->oid : NULL);
+
+	ret = traverse_trees(o->src_index, n, t, &info);
+
+	for (i = 0; i < n; i++)
+		free(tree_bufs[i]);
+
+	return ret;
 }
 
 static int deleted_entry(const struct cache_entry *ce,
@@ -2361,7 +2636,10 @@ static int deleted_entry(const struct cache_entry *ce,
 		if (verify_absent(ce, ERROR_WOULD_LOSE_UNTRACKED_REMOVED, o))
 			return -1;
 		return 0;
+	} else if (verify_absent_if_directory(ce, ERROR_WOULD_LOSE_UNTRACKED_REMOVED, o)) {
+		return -1;
 	}
+
 	if (!(old->ce_flags & CE_CONFLICTED) && verify_uptodate(old, o))
 		return -1;
 	add_entry(o, ce, CE_REMOVE, 0);
@@ -2453,16 +2731,24 @@ int threeway_merge(const struct cache_entry * const *stages,
 	 */
 	/* #14, #14ALT, #2ALT */
 	if (remote && !df_conflict_head && head_match && !remote_match) {
-		if (index && !same(index, remote) && !same(index, head))
-			return reject_merge(index, o);
+		if (index && !same(index, remote) && !same(index, head)) {
+			if (S_ISSPARSEDIR(index->ce_mode))
+				return merged_sparse_dir(stages, 4, o);
+			else
+				return reject_merge(index, o);
+		}
 		return merged_entry(remote, index, o);
 	}
 	/*
 	 * If we have an entry in the index cache, then we want to
 	 * make sure that it matches head.
 	 */
-	if (index && !same(index, head))
-		return reject_merge(index, o);
+	if (index && !same(index, head)) {
+		if (S_ISSPARSEDIR(index->ce_mode))
+			return merged_sparse_dir(stages, 4, o);
+		else
+			return reject_merge(index, o);
+	}
 
 	if (head) {
 		/* #5ALT, #15 */
@@ -2524,11 +2810,21 @@ int threeway_merge(const struct cache_entry * const *stages,
 
 	}
 
-	/* Below are "no merge" cases, which require that the index be
-	 * up-to-date to avoid the files getting overwritten with
-	 * conflict resolution files.
-	 */
+	/* Handle "no merge" cases (see t/t1000-read-tree-m-3way.sh) */
 	if (index) {
+		/*
+		 * If we've reached the "no merge" cases and we're merging
+		 * a sparse directory, we may have an "edit/edit" conflict that
+		 * can be resolved by individually merging directory contents.
+		 */
+		if (S_ISSPARSEDIR(index->ce_mode))
+			return merged_sparse_dir(stages, 4, o);
+
+		/*
+		 * If we're not merging a sparse directory, ensure the index is
+		 * up-to-date to avoid files getting overwritten with conflict
+		 * resolution files
+		 */
 		if (verify_uptodate(index, o))
 			return -1;
 	}
@@ -2619,6 +2915,14 @@ int twoway_merge(const struct cache_entry * const *src,
 			 * reject the merge instead.
 			 */
 			return merged_entry(newtree, current, o);
+		} else if (S_ISSPARSEDIR(current->ce_mode)) {
+			/*
+			 * The sparse directories differ, but we don't know whether that's
+			 * because of two different files in the directory being modified
+			 * (can be trivially merged) or if there is a real file conflict.
+			 * Merge the sparse directory by OID to compare file-by-file.
+			 */
+			return merged_sparse_dir(src, 3, o);
 		} else
 			return reject_merge(current, o);
 	}

@@ -675,7 +675,7 @@ static int tree_write_stack_finish_subtree(struct tree_write_stack *tws)
 		ret = tree_write_stack_finish_subtree(n);
 		if (ret)
 			return ret;
-		ret = write_object_file(n->buf.buf, n->buf.len, tree_type, &s);
+		ret = write_object_file(n->buf.buf, n->buf.len, OBJ_TREE, &s);
 		if (ret)
 			return ret;
 		strbuf_release(&n->buf);
@@ -836,7 +836,7 @@ int combine_notes_concatenate(struct object_id *cur_oid,
 	free(new_msg);
 
 	/* create a new blob object from buf */
-	ret = write_object_file(buf, buf_len, blob_type, cur_oid);
+	ret = write_object_file(buf, buf_len, OBJ_BLOB, cur_oid);
 	free(buf);
 	return ret;
 }
@@ -916,7 +916,7 @@ int combine_notes_cat_sort_uniq(struct object_id *cur_oid,
 				 string_list_join_lines_helper, &buf))
 		goto out;
 
-	ret = write_object_file(buf.buf, buf.len, blob_type, cur_oid);
+	ret = write_object_file(buf.buf, buf.len, OBJ_BLOB, cur_oid);
 
 out:
 	strbuf_release(&buf);
@@ -924,8 +924,9 @@ out:
 	return ret;
 }
 
-static int string_list_add_one_ref(const char *refname, const struct object_id *oid,
-				   int flag, void *cb)
+static int string_list_add_one_ref(const char *refname,
+				   const struct object_id *oid UNUSED,
+				   int flag UNUSED, void *cb)
 {
 	struct string_list *refs = cb;
 	if (!unsorted_string_list_has_string(refs, refname))
@@ -1005,6 +1006,7 @@ void init_notes(struct notes_tree *t, const char *notes_ref,
 
 	if (!notes_ref)
 		notes_ref = default_notes_ref();
+	update_ref_namespace(NAMESPACE_NOTES, xstrdup(notes_ref));
 
 	if (!combine_notes)
 		combine_notes = combine_notes_concatenate;
@@ -1192,7 +1194,7 @@ int write_notes_tree(struct notes_tree *t, struct object_id *result)
 	ret = for_each_note(t, flags, write_each_note, &cb_data) ||
 	      write_each_non_note_until(NULL, &cb_data) ||
 	      tree_write_stack_finish_subtree(&root) ||
-	      write_object_file(root.buf.buf, root.buf.len, tree_type, result);
+	      write_object_file(root.buf.buf, root.buf.len, OBJ_TREE, result);
 	strbuf_release(&root.buf);
 	return ret;
 }

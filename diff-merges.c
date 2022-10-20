@@ -6,7 +6,7 @@ typedef void (*diff_merges_setup_func_t)(struct rev_info *);
 static void set_separate(struct rev_info *revs);
 
 static diff_merges_setup_func_t set_to_default = set_separate;
-static int suppress_parsing;
+static int suppress_m_parsing;
 
 static void suppress(struct rev_info *revs)
 {
@@ -17,12 +17,14 @@ static void suppress(struct rev_info *revs)
 	revs->combined_all_paths = 0;
 	revs->merges_imply_patch = 0;
 	revs->merges_need_diff = 0;
+	revs->remerge_diff = 0;
 }
 
 static void set_separate(struct rev_info *revs)
 {
 	suppress(revs);
 	revs->separate_merges = 1;
+	revs->simplify_history = 0;
 }
 
 static void set_first_parent(struct rev_info *revs)
@@ -45,6 +47,13 @@ static void set_dense_combined(struct rev_info *revs)
 	revs->dense_combined_merges = 1;
 }
 
+static void set_remerge_diff(struct rev_info *revs)
+{
+	suppress(revs);
+	revs->remerge_diff = 1;
+	revs->simplify_history = 0;
+}
+
 static diff_merges_setup_func_t func_by_opt(const char *optarg)
 {
 	if (!strcmp(optarg, "off") || !strcmp(optarg, "none"))
@@ -57,6 +66,8 @@ static diff_merges_setup_func_t func_by_opt(const char *optarg)
 		return set_combined;
 	else if (!strcmp(optarg, "cc") || !strcmp(optarg, "dense-combined"))
 		return set_dense_combined;
+	else if (!strcmp(optarg, "r") || !strcmp(optarg, "remerge"))
+		return set_remerge_diff;
 	else if (!strcmp(optarg, "m") || !strcmp(optarg, "on"))
 		return set_to_default;
 	return NULL;
@@ -67,7 +78,7 @@ static void set_diff_merges(struct rev_info *revs, const char *optarg)
 	diff_merges_setup_func_t func = func_by_opt(optarg);
 
 	if (!func)
-		die(_("unknown value for --diff-merges: %s"), optarg);
+		die(_("invalid value for '%s': '%s'"), "--diff-merges", optarg);
 
 	func(revs);
 
@@ -91,9 +102,9 @@ int diff_merges_config(const char *value)
 	return 0;
 }
 
-void diff_merges_suppress_options_parsing(void)
+void diff_merges_suppress_m_parsing(void)
 {
-	suppress_parsing = 1;
+	suppress_m_parsing = 1;
 }
 
 int diff_merges_parse_opts(struct rev_info *revs, const char **argv)
@@ -102,16 +113,16 @@ int diff_merges_parse_opts(struct rev_info *revs, const char **argv)
 	const char *optarg;
 	const char *arg = argv[0];
 
-	if (suppress_parsing)
-		return 0;
-
-	if (!strcmp(arg, "-m")) {
+	if (!suppress_m_parsing && !strcmp(arg, "-m")) {
 		set_to_default(revs);
 	} else if (!strcmp(arg, "-c")) {
 		set_combined(revs);
 		revs->merges_imply_patch = 1;
 	} else if (!strcmp(arg, "--cc")) {
 		set_dense_combined(revs);
+		revs->merges_imply_patch = 1;
+	} else if (!strcmp(arg, "--remerge-diff")) {
+		set_remerge_diff(revs);
 		revs->merges_imply_patch = 1;
 	} else if (!strcmp(arg, "--no-diff-merges")) {
 		suppress(revs);
@@ -153,9 +164,6 @@ void diff_merges_set_dense_combined_if_unset(struct rev_info *revs)
 
 void diff_merges_setup_revs(struct rev_info *revs)
 {
-	if (suppress_parsing)
-		return;
-
 	if (revs->combine_merges == 0)
 		revs->dense_combined_merges = 0;
 	if (revs->separate_merges == 0)

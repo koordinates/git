@@ -292,7 +292,7 @@ test_expect_success 'push with receive.fsck.missingEmail=warn' '
 		receive.fsck.missingEmail warn &&
 	git push --porcelain dst bogus >act 2>&1 &&
 	grep "missingEmail" act &&
-	test_i18ngrep "Skipping unknown msg id.*whatever" act &&
+	test_i18ngrep "skipping unknown msg id.*whatever" act &&
 	git --git-dir=dst/.git branch -D bogus &&
 	git --git-dir=dst/.git config --add \
 		receive.fsck.missingEmail ignore &&
@@ -350,6 +350,23 @@ test_expect_success \
 		fetch.fsck.unterminatedheader warn &&
 	test_must_fail git --git-dir=dst/.git fetch "file://$(pwd)" HEAD &&
 	grep "Cannot demote unterminatedheader" act
+'
+
+test_expect_success 'badFilemode is not a strict error' '
+	git init --bare badmode.git &&
+	tree=$(
+		cd badmode.git &&
+		blob=$(echo blob | git hash-object -w --stdin | hex2oct) &&
+		printf "123456 foo\0${blob}" |
+		git hash-object -t tree --stdin -w --literally
+	) &&
+
+	rm -rf dst.git &&
+	git init --bare dst.git &&
+	git -C dst.git config transfer.fsckObjects true &&
+
+	git -C badmode.git push ../dst.git $tree:refs/tags/tree 2>err &&
+	grep "$tree: badFilemode" err
 '
 
 test_done

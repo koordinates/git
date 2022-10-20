@@ -2,12 +2,8 @@
 
 test_description='wildmatch tests'
 
+TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
-
-# Disable expensive chain-lint tests; all of the tests in this script
-# are variants of a few trivial test-tool invocations, and there are a lot of
-# them.
-GIT_TEST_CHAIN_LINT_HARDER_DEFAULT=0
 
 should_create_test_file() {
 	file=$1
@@ -192,7 +188,7 @@ match() {
 		file=$(cat .git/expected_test_file) &&
 		if should_create_test_file "$file"
 		then
-			dirs=${file%/*}
+			dirs=${file%/*} &&
 			if test "$file" != "$dirs"
 			then
 				mkdir -p -- "$dirs" &&

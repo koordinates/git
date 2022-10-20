@@ -26,13 +26,13 @@
 #include "wt-status.h"
 #include "commit-reach.h"
 #include "sequencer.h"
+#include "packfile.h"
 
 /**
  * Parses the value of --rebase. If value is a false value, returns
  * REBASE_FALSE. If value is a true value, returns REBASE_TRUE. If value is
- * "merges", returns REBASE_MERGES. If value is "preserve", returns
- * REBASE_PRESERVE. If value is a invalid value, dies with a fatal error if
- * fatal is true, otherwise returns REBASE_INVALID.
+ * "merges", returns REBASE_MERGES. If value is a invalid value, dies with
+ * a fatal error if fatal is true, otherwise returns REBASE_INVALID.
  */
 static enum rebase_type parse_config_rebase(const char *key, const char *value,
 		int fatal)
@@ -42,9 +42,9 @@ static enum rebase_type parse_config_rebase(const char *key, const char *value,
 		return v;
 
 	if (fatal)
-		die(_("Invalid value for %s: %s"), key, value);
+		die(_("invalid value for '%s': '%s'"), key, value);
 	else
-		error(_("Invalid value for %s: %s"), key, value);
+		error(_("invalid value for '%s': '%s'"), key, value);
 
 	return REBASE_INVALID;
 }
@@ -72,6 +72,7 @@ static const char * const pull_usage[] = {
 static int opt_verbosity;
 static char *opt_progress;
 static int recurse_submodules = RECURSE_SUBMODULES_DEFAULT;
+static int recurse_submodules_cli = RECURSE_SUBMODULES_DEFAULT;
 
 /* Options passed to git-merge or git-rebase */
 static enum rebase_type opt_rebase = -1;
@@ -84,6 +85,7 @@ static char *opt_edit;
 static char *cleanup_arg;
 static char *opt_ff;
 static char *opt_verify_signatures;
+static char *opt_verify;
 static int opt_autostash = -1;
 static int config_autostash;
 static int check_trust_level = 1;
@@ -119,14 +121,14 @@ static struct option pull_options[] = {
 		N_("force progress reporting"),
 		PARSE_OPT_NOARG),
 	OPT_CALLBACK_F(0, "recurse-submodules",
-		   &recurse_submodules, N_("on-demand"),
+		   &recurse_submodules_cli, N_("on-demand"),
 		   N_("control for recursive fetching of submodules"),
 		   PARSE_OPT_OPTARG, option_fetch_parse_recurse_submodules),
 
 	/* Options passed to git-merge or git-rebase */
 	OPT_GROUP(N_("Options related to merging")),
 	OPT_CALLBACK_F('r', "rebase", &opt_rebase,
-		"(false|true|merges|preserve|interactive)",
+		"(false|true|merges|interactive)",
 		N_("incorporate changes by rebasing rather than merging"),
 		PARSE_OPT_OPTARG, parse_opt_rebase),
 	OPT_PASSTHRU('n', NULL, &opt_diffstat, NULL,
@@ -160,6 +162,9 @@ static struct option pull_options[] = {
 	OPT_PASSTHRU(0, "ff-only", &opt_ff, NULL,
 		N_("abort if fast-forward is not possible"),
 		PARSE_OPT_NOARG | PARSE_OPT_NONEG),
+	OPT_PASSTHRU(0, "verify", &opt_verify, NULL,
+		N_("control use of pre-merge-commit and commit-msg hooks"),
+		PARSE_OPT_NOARG),
 	OPT_PASSTHRU(0, "verify-signatures", &opt_verify_signatures, NULL,
 		N_("verify that the named commit has a valid GPG signature"),
 		PARSE_OPT_NOARG),
@@ -314,7 +319,7 @@ static const char *config_get_ff(void)
 	if (!strcmp(value, "only"))
 		return "--ff-only";
 
-	die(_("Invalid value for pull.ff: %s"), value);
+	die(_("invalid value for '%s': '%s'"), "pull.ff", value);
 }
 
 /**
@@ -532,8 +537,8 @@ static int run_fetch(const char *repo, const char **refspecs)
 		strvec_push(&args, opt_tags);
 	if (opt_prune)
 		strvec_push(&args, opt_prune);
-	if (recurse_submodules != RECURSE_SUBMODULES_DEFAULT)
-		switch (recurse_submodules) {
+	if (recurse_submodules_cli != RECURSE_SUBMODULES_DEFAULT)
+		switch (recurse_submodules_cli) {
 		case RECURSE_SUBMODULES_ON:
 			strvec_push(&args, "--recurse-submodules=on");
 			break;
@@ -577,7 +582,7 @@ static int run_fetch(const char *repo, const char **refspecs)
 		strvec_pushv(&args, refspecs);
 	} else if (*refspecs)
 		BUG("refspecs without repo?");
-	ret = run_command_v_opt(args.v, RUN_GIT_CMD);
+	ret = run_command_v_opt(args.v, RUN_GIT_CMD | RUN_CLOSE_OBJECT_STORE);
 	strvec_clear(&args);
 	return ret;
 }
@@ -675,6 +680,8 @@ static int run_merge(void)
 		strvec_pushf(&args, "--cleanup=%s", cleanup_arg);
 	if (opt_ff)
 		strvec_push(&args, opt_ff);
+	if (opt_verify)
+		strvec_push(&args, opt_verify);
 	if (opt_verify_signatures)
 		strvec_push(&args, opt_verify_signatures);
 	strvec_pushv(&args, opt_strategies.v);
@@ -883,8 +890,6 @@ static int run_rebase(const struct object_id *newbase,
 	/* Options passed to git-rebase */
 	if (opt_rebase == REBASE_MERGES)
 		strvec_push(&args, "--rebase-merges");
-	else if (opt_rebase == REBASE_PRESERVE)
-		strvec_push(&args, "--preserve-merges");
 	else if (opt_rebase == REBASE_INTERACTIVE)
 		strvec_push(&args, "--interactive");
 	if (opt_diffstat)
@@ -933,13 +938,40 @@ static int get_can_ff(struct object_id *orig_head,
 	return ret;
 }
 
+/*
+ * Is orig_head a descendant of _all_ merge_heads?
+ * Unfortunately is_descendant_of() cannot be used as it asks
+ * if orig_head is a descendant of at least one of them.
+ */
+static int already_up_to_date(struct object_id *orig_head,
+			      struct oid_array *merge_heads)
+{
+	int i;
+	struct commit *ours;
+
+	ours = lookup_commit_reference(the_repository, orig_head);
+	for (i = 0; i < merge_heads->nr; i++) {
+		struct commit_list *list = NULL;
+		struct commit *theirs;
+		int ok;
+
+		theirs = lookup_commit_reference(the_repository, &merge_heads->oid[i]);
+		commit_list_insert(theirs, &list);
+		ok = repo_is_descendant_of(the_repository, ours, list);
+		free_commit_list(list);
+		if (!ok)
+			return 0;
+	}
+	return 1;
+}
+
 static void show_advice_pull_non_ff(void)
 {
 	advise(_("You have divergent branches and need to specify how to reconcile them.\n"
 		 "You can do so by running one of the following commands sometime before\n"
 		 "your next pull:\n"
 		 "\n"
-		 "  git config pull.rebase false  # merge (the default strategy)\n"
+		 "  git config pull.rebase false  # merge\n"
 		 "  git config pull.rebase true   # rebase\n"
 		 "  git config pull.ff only       # fast-forward only\n"
 		 "\n"
@@ -957,13 +989,22 @@ int cmd_pull(int argc, const char **argv, const char *prefix)
 	struct object_id rebase_fork_point;
 	int rebase_unspecified = 0;
 	int can_ff;
+	int divergent;
+	int ret;
 
 	if (!getenv("GIT_REFLOG_ACTION"))
 		set_reflog_message(argc, argv);
 
 	git_config(git_pull_config, NULL);
+	if (the_repository->gitdir) {
+		prepare_repo_settings(the_repository);
+		the_repository->settings.command_requires_full_index = 0;
+	}
 
 	argc = parse_options(argc, argv, prefix, pull_options, pull_usage, 0);
+
+	if (recurse_submodules_cli != RECURSE_SUBMODULES_DEFAULT)
+		recurse_submodules = recurse_submodules_cli;
 
 	if (cleanup_arg)
 		/*
@@ -1004,14 +1045,13 @@ int cmd_pull(int argc, const char **argv, const char *prefix)
 		oidclr(&orig_head);
 
 	if (opt_rebase) {
-		int autostash = config_autostash;
-		if (opt_autostash != -1)
-			autostash = opt_autostash;
+		if (opt_autostash == -1)
+			opt_autostash = config_autostash;
 
 		if (is_null_oid(&orig_head) && !is_cache_unborn())
 			die(_("Updating an unborn branch with changes added to the index."));
 
-		if (!autostash)
+		if (!opt_autostash)
 			require_clean_work_tree(the_repository,
 				N_("pull with rebase"),
 				_("please commit or stash them."), 1, 0);
@@ -1061,7 +1101,8 @@ int cmd_pull(int argc, const char **argv, const char *prefix)
 	if (is_null_oid(&orig_head)) {
 		if (merge_heads.nr > 1)
 			die(_("Cannot merge multiple branches into empty head."));
-		return pull_into_void(merge_heads.oid, &curr_head);
+		ret = pull_into_void(merge_heads.oid, &curr_head);
+		goto cleanup;
 	}
 	if (merge_heads.nr > 1) {
 		if (opt_rebase)
@@ -1071,22 +1112,21 @@ int cmd_pull(int argc, const char **argv, const char *prefix)
 	}
 
 	can_ff = get_can_ff(&orig_head, &merge_heads);
+	divergent = !can_ff && !already_up_to_date(&orig_head, &merge_heads);
 
 	/* ff-only takes precedence over rebase */
 	if (opt_ff && !strcmp(opt_ff, "--ff-only")) {
-		if (!can_ff)
+		if (divergent)
 			die_ff_impossible();
 		opt_rebase = REBASE_FALSE;
 	}
 	/* If no action specified and we can't fast forward, then warn. */
-	if (!opt_ff && rebase_unspecified && !can_ff) {
+	if (!opt_ff && rebase_unspecified && divergent) {
 		show_advice_pull_non_ff();
 		die(_("Need to specify how to reconcile divergent branches."));
 	}
 
 	if (opt_rebase) {
-		int ret = 0;
-
 		struct object_id newbase;
 		struct object_id upstream;
 		get_rebase_newbase_and_upstream(&newbase, &upstream, &curr_head,
@@ -1109,12 +1149,16 @@ int cmd_pull(int argc, const char **argv, const char *prefix)
 			     recurse_submodules == RECURSE_SUBMODULES_ON_DEMAND))
 			ret = rebase_submodules();
 
-		return ret;
+		goto cleanup;
 	} else {
-		int ret = run_merge();
+		ret = run_merge();
 		if (!ret && (recurse_submodules == RECURSE_SUBMODULES_ON ||
 			     recurse_submodules == RECURSE_SUBMODULES_ON_DEMAND))
 			ret = update_submodules();
-		return ret;
+		goto cleanup;
 	}
+
+cleanup:
+	oid_array_clear(&merge_heads);
+	return ret;
 }

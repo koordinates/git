@@ -1,4 +1,5 @@
 #include "git-compat-util.h"
+#include "git-curl-compat.h"
 #include "http.h"
 #include "config.h"
 #include "pack.h"
@@ -47,19 +48,19 @@ static struct {
 	{ "sslv2", CURL_SSLVERSION_SSLv2 },
 	{ "sslv3", CURL_SSLVERSION_SSLv3 },
 	{ "tlsv1", CURL_SSLVERSION_TLSv1 },
-#if LIBCURL_VERSION_NUM >= 0x072200
+#ifdef GIT_CURL_HAVE_CURL_SSLVERSION_TLSv1_0
 	{ "tlsv1.0", CURL_SSLVERSION_TLSv1_0 },
 	{ "tlsv1.1", CURL_SSLVERSION_TLSv1_1 },
 	{ "tlsv1.2", CURL_SSLVERSION_TLSv1_2 },
 #endif
-#if LIBCURL_VERSION_NUM >= 0x073400
+#ifdef GIT_CURL_HAVE_CURL_SSLVERSION_TLSv1_3
 	{ "tlsv1.3", CURL_SSLVERSION_TLSv1_3 },
 #endif
 };
 static const char *ssl_key;
 static const char *ssl_capath;
 static const char *curl_no_proxy;
-#if LIBCURL_VERSION_NUM >= 0x072c00
+#ifdef GIT_CURL_HAVE_CURLOPT_PINNEDPUBLICKEY
 static const char *ssl_pinnedkey;
 #endif
 static const char *ssl_cainfo;
@@ -126,6 +127,8 @@ static unsigned long empty_auth_useless =
 static struct curl_slist *pragma_header;
 static struct curl_slist *no_pragma_header;
 static struct string_list extra_http_headers = STRING_LIST_INIT_DUP;
+
+static struct curl_slist *host_resolutions;
 
 static struct active_request_slot *active_queue_head;
 
@@ -196,11 +199,11 @@ static void finish_active_slot(struct active_request_slot *slot)
 	closedown_active_slot(slot);
 	curl_easy_getinfo(slot->curl, CURLINFO_HTTP_CODE, &slot->http_code);
 
-	if (slot->finished != NULL)
+	if (slot->finished)
 		(*slot->finished) = 1;
 
 	/* Store slot results so they can be read after the slot is reused */
-	if (slot->results != NULL) {
+	if (slot->results) {
 		slot->results->curl_result = slot->curl_result;
 		slot->results->http_code = slot->http_code;
 		curl_easy_getinfo(slot->curl, CURLINFO_HTTPAUTH_AVAIL,
@@ -211,7 +214,7 @@ static void finish_active_slot(struct active_request_slot *slot)
 	}
 
 	/* Run callback if appropriate */
-	if (slot->callback_func != NULL)
+	if (slot->callback_func)
 		slot->callback_func(slot->callback_data);
 }
 
@@ -233,7 +236,7 @@ static void process_curl_messages(void)
 			while (slot != NULL &&
 			       slot->curl != curl_message->easy_handle)
 				slot = slot->next;
-			if (slot != NULL) {
+			if (slot) {
 				xmulti_remove_handle(slot);
 				slot->curl_result = curl_result;
 				finish_active_slot(slot);
@@ -346,7 +349,7 @@ static int http_options(const char *var, const char *value, void *cb)
 	if (!strcmp("http.postbuffer", var)) {
 		http_post_buffer = git_config_ssize_t(var, value);
 		if (http_post_buffer < 0)
-			warning(_("negative value for http.postbuffer; defaulting to %d"), LARGE_PACKET_MAX);
+			warning(_("negative value for http.postBuffer; defaulting to %d"), LARGE_PACKET_MAX);
 		if (http_post_buffer < LARGE_PACKET_MAX)
 			http_post_buffer = LARGE_PACKET_MAX;
 		return 0;
@@ -373,10 +376,10 @@ static int http_options(const char *var, const char *value, void *cb)
 	}
 
 	if (!strcmp("http.pinnedpubkey", var)) {
-#if LIBCURL_VERSION_NUM >= 0x072c00
+#ifdef GIT_CURL_HAVE_CURLOPT_PINNEDPUBLICKEY
 		return git_config_pathname(&ssl_pinnedkey, var, value);
 #else
-		warning(_("Public key pinning not supported with cURL < 7.44.0"));
+		warning(_("Public key pinning not supported with cURL < 7.39.0"));
 		return 0;
 #endif
 	}
@@ -388,6 +391,18 @@ static int http_options(const char *var, const char *value, void *cb)
 			string_list_clear(&extra_http_headers, 0);
 		} else {
 			string_list_append(&extra_http_headers, value);
+		}
+		return 0;
+	}
+
+	if (!strcmp("http.curloptresolve", var)) {
+		if (!value) {
+			return config_error_nonbool(var);
+		} else if (!*value) {
+			curl_slist_free_all(host_resolutions);
+			host_resolutions = NULL;
+		} else {
+			host_resolutions = curl_slist_append(host_resolutions, value);
 		}
 		return 0;
 	}
@@ -500,7 +515,7 @@ static int has_cert_password(void)
 	return 1;
 }
 
-#if LIBCURL_VERSION_NUM >= 0x073400
+#ifdef GIT_CURL_HAVE_CURLOPT_PROXY_KEYPASSWD
 static int has_proxy_cert_password(void)
 {
 	if (http_proxy_ssl_cert == NULL || proxy_ssl_cert_password_required != 1)
@@ -516,7 +531,7 @@ static int has_proxy_cert_password(void)
 }
 #endif
 
-#if LIBCURL_VERSION_NUM >= 0x071900
+#ifdef GITCURL_HAVE_CURLOPT_TCP_KEEPALIVE
 static void set_curl_keepalive(CURL *c)
 {
 	curl_easy_setopt(c, CURLOPT_TCP_KEEPALIVE, 1);
@@ -536,7 +551,7 @@ static int sockopt_callback(void *client, curl_socket_t fd, curlsocktype type)
 	if (rc < 0)
 		warning_errno("unable to set SO_KEEPALIVE on socket");
 
-	return 0; /* CURL_SOCKOPT_OK only exists since curl 7.21.5 */
+	return CURL_SOCKOPT_OK;
 }
 
 static void set_curl_keepalive(CURL *c)
@@ -550,8 +565,8 @@ static void redact_sensitive_header(struct strbuf *header)
 	const char *sensitive_header;
 
 	if (trace_curl_redact &&
-	    (skip_prefix(header->buf, "Authorization:", &sensitive_header) ||
-	     skip_prefix(header->buf, "Proxy-Authorization:", &sensitive_header))) {
+	    (skip_iprefix(header->buf, "Authorization:", &sensitive_header) ||
+	     skip_iprefix(header->buf, "Proxy-Authorization:", &sensitive_header))) {
 		/* The first token is the type, which is OK to log */
 		while (isspace(*sensitive_header))
 			sensitive_header++;
@@ -561,7 +576,7 @@ static void redact_sensitive_header(struct strbuf *header)
 		strbuf_setlen(header,  sensitive_header - header->buf);
 		strbuf_addstr(header, " <redacted>");
 	} else if (trace_curl_redact &&
-		   skip_prefix(header->buf, "Cookie:", &sensitive_header)) {
+		   skip_iprefix(header->buf, "Cookie:", &sensitive_header)) {
 		struct strbuf redacted_header = STRBUF_INIT;
 		const char *cookie;
 
@@ -732,7 +747,7 @@ static long get_curl_allowed_protocols(int from_user)
 	return allowed_protocols;
 }
 
-#if LIBCURL_VERSION_NUM >=0x072f00
+#ifdef GIT_CURL_HAVE_CURL_HTTP_VERSION_2
 static int get_curl_http_version_opt(const char *version_string, long *opt)
 {
 	int i;
@@ -774,7 +789,7 @@ static CURL *get_curl_handle(void)
 		curl_easy_setopt(result, CURLOPT_SSL_VERIFYHOST, 2);
 	}
 
-#if LIBCURL_VERSION_NUM >= 0x072f00 // 7.47.0
+#ifdef GIT_CURL_HAVE_CURL_HTTP_VERSION_2
     if (curl_http_version) {
 		long opt;
 		if (!get_curl_http_version_opt(curl_http_version, &opt)) {
@@ -805,7 +820,7 @@ static CURL *get_curl_handle(void)
 
 	if (http_ssl_backend && !strcmp("schannel", http_ssl_backend) &&
 	    !http_schannel_check_revoke) {
-#if LIBCURL_VERSION_NUM >= 0x072c00
+#ifdef GIT_CURL_HAVE_CURLSSLOPT_NO_REVOKE
 		curl_easy_setopt(result, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NO_REVOKE);
 #else
 		warning(_("CURLSSLOPT_NO_REVOKE not supported with cURL < 7.44.0"));
@@ -837,29 +852,29 @@ static CURL *get_curl_handle(void)
 		curl_easy_setopt(result, CURLOPT_SSL_CIPHER_LIST,
 				ssl_cipherlist);
 
-	if (ssl_cert != NULL)
+	if (ssl_cert)
 		curl_easy_setopt(result, CURLOPT_SSLCERT, ssl_cert);
 	if (has_cert_password())
 		curl_easy_setopt(result, CURLOPT_KEYPASSWD, cert_auth.password);
-	if (ssl_key != NULL)
+	if (ssl_key)
 		curl_easy_setopt(result, CURLOPT_SSLKEY, ssl_key);
-	if (ssl_capath != NULL)
+	if (ssl_capath)
 		curl_easy_setopt(result, CURLOPT_CAPATH, ssl_capath);
-#if LIBCURL_VERSION_NUM >= 0x072c00
-	if (ssl_pinnedkey != NULL)
+#ifdef GIT_CURL_HAVE_CURLOPT_PINNEDPUBLICKEY
+	if (ssl_pinnedkey)
 		curl_easy_setopt(result, CURLOPT_PINNEDPUBLICKEY, ssl_pinnedkey);
 #endif
 	if (http_ssl_backend && !strcmp("schannel", http_ssl_backend) &&
 	    !http_schannel_use_ssl_cainfo) {
 		curl_easy_setopt(result, CURLOPT_CAINFO, NULL);
-#if LIBCURL_VERSION_NUM >= 0x073400
+#ifdef GIT_CURL_HAVE_CURLOPT_PROXY_CAINFO
 		curl_easy_setopt(result, CURLOPT_PROXY_CAINFO, NULL);
 #endif
 	} else if (ssl_cainfo != NULL || http_proxy_ssl_ca_info != NULL) {
-		if (ssl_cainfo != NULL)
+		if (ssl_cainfo)
 			curl_easy_setopt(result, CURLOPT_CAINFO, ssl_cainfo);
-#if LIBCURL_VERSION_NUM >= 0x073400
-		if (http_proxy_ssl_ca_info != NULL)
+#ifdef GIT_CURL_HAVE_CURLOPT_PROXY_CAINFO
+		if (http_proxy_ssl_ca_info)
 			curl_easy_setopt(result, CURLOPT_PROXY_CAINFO, http_proxy_ssl_ca_info);
 #endif
 	}
@@ -927,7 +942,6 @@ static CURL *get_curl_handle(void)
 		 */
 		curl_easy_setopt(result, CURLOPT_PROXY, "");
 	} else if (curl_http_proxy) {
-#if LIBCURL_VERSION_NUM >= 0x071800
 		if (starts_with(curl_http_proxy, "socks5h"))
 			curl_easy_setopt(result,
 				CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
@@ -940,8 +954,7 @@ static CURL *get_curl_handle(void)
 		else if (starts_with(curl_http_proxy, "socks"))
 			curl_easy_setopt(result,
 				CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4);
-#endif
-#if LIBCURL_VERSION_NUM >= 0x073400
+#ifdef GIT_CURL_HAVE_CURLOPT_PROXY_KEYPASSWD
 		else if (starts_with(curl_http_proxy, "https")) {
 			curl_easy_setopt(result, CURLOPT_PROXYTYPE, CURLPROXY_HTTPS);
 
@@ -991,7 +1004,7 @@ void http_init(struct remote *remote, const char *url, int proactive_auth)
 	char *low_speed_limit;
 	char *low_speed_time;
 	char *normalized_url;
-	struct urlmatch_config config = { STRING_LIST_INIT_DUP };
+	struct urlmatch_config config = URLMATCH_CONFIG_INIT;
 
 	config.section = "http";
 	config.key = NULL;
@@ -1006,7 +1019,7 @@ void http_init(struct remote *remote, const char *url, int proactive_auth)
 	free(normalized_url);
 	string_list_clear(&config.vars, 1);
 
-#if LIBCURL_VERSION_NUM >= 0x073800
+#ifdef GIT_CURL_HAVE_CURLSSLSET_NO_BACKENDS
 	if (http_ssl_backend) {
 		const curl_ssl_backend **backends;
 		struct strbuf buf = STRBUF_INIT;
@@ -1051,7 +1064,7 @@ void http_init(struct remote *remote, const char *url, int proactive_auth)
 
 	{
 		char *http_max_requests = getenv("GIT_HTTP_MAX_REQUESTS");
-		if (http_max_requests != NULL)
+		if (http_max_requests)
 			max_requests = atoi(http_max_requests);
 	}
 
@@ -1070,10 +1083,10 @@ void http_init(struct remote *remote, const char *url, int proactive_auth)
 	set_from_env(&user_agent, "GIT_HTTP_USER_AGENT");
 
 	low_speed_limit = getenv("GIT_HTTP_LOW_SPEED_LIMIT");
-	if (low_speed_limit != NULL)
+	if (low_speed_limit)
 		curl_low_speed_limit = strtol(low_speed_limit, NULL, 10);
 	low_speed_time = getenv("GIT_HTTP_LOW_SPEED_TIME");
-	if (low_speed_time != NULL)
+	if (low_speed_time)
 		curl_low_speed_time = strtol(low_speed_time, NULL, 10);
 
 	if (curl_ssl_verify == -1)
@@ -1110,7 +1123,7 @@ void http_cleanup(void)
 
 	while (slot != NULL) {
 		struct active_request_slot *next = slot->next;
-		if (slot->curl != NULL) {
+		if (slot->curl) {
 			xmulti_remove_handle(slot);
 			curl_easy_cleanup(slot->curl);
 		}
@@ -1132,6 +1145,9 @@ void http_cleanup(void)
 	curl_slist_free_all(no_pragma_header);
 	no_pragma_header = NULL;
 
+	curl_slist_free_all(host_resolutions);
+	host_resolutions = NULL;
+
 	if (curl_http_proxy) {
 		free((void *)curl_http_proxy);
 		curl_http_proxy = NULL;
@@ -1148,13 +1164,13 @@ void http_cleanup(void)
 	free((void *)http_proxy_authmethod);
 	http_proxy_authmethod = NULL;
 
-	if (cert_auth.password != NULL) {
+	if (cert_auth.password) {
 		memset(cert_auth.password, 0, strlen(cert_auth.password));
 		FREE_AND_NULL(cert_auth.password);
 	}
 	ssl_cert_password_required = 0;
 
-	if (proxy_cert_auth.password != NULL) {
+	if (proxy_cert_auth.password) {
 		memset(proxy_cert_auth.password, 0, strlen(proxy_cert_auth.password));
 		FREE_AND_NULL(proxy_cert_auth.password);
 	}
@@ -1180,14 +1196,14 @@ struct active_request_slot *get_active_slot(void)
 	while (slot != NULL && slot->in_use)
 		slot = slot->next;
 
-	if (slot == NULL) {
+	if (!slot) {
 		newslot = xmalloc(sizeof(*newslot));
 		newslot->curl = NULL;
 		newslot->in_use = 0;
 		newslot->next = NULL;
 
 		slot = active_queue_head;
-		if (slot == NULL) {
+		if (!slot) {
 			active_queue_head = newslot;
 		} else {
 			while (slot->next != NULL)
@@ -1197,7 +1213,7 @@ struct active_request_slot *get_active_slot(void)
 		slot = newslot;
 	}
 
-	if (slot->curl == NULL) {
+	if (!slot->curl) {
 		slot->curl = curl_easy_duphandle(curl_default);
 		curl_session_count++;
 	}
@@ -1212,6 +1228,7 @@ struct active_request_slot *get_active_slot(void)
 	if (curl_save_cookies)
 		curl_easy_setopt(slot->curl, CURLOPT_COOKIEJAR, curl_cookie_file);
 	curl_easy_setopt(slot->curl, CURLOPT_HTTPHEADER, pragma_header);
+	curl_easy_setopt(slot->curl, CURLOPT_RESOLVE, host_resolutions);
 	curl_easy_setopt(slot->curl, CURLOPT_ERRORBUFFER, curl_errorstr);
 	curl_easy_setopt(slot->curl, CURLOPT_CUSTOMREQUEST, NULL);
 	curl_easy_setopt(slot->curl, CURLOPT_READFUNCTION, NULL);
@@ -1368,6 +1385,32 @@ void run_active_slot(struct active_request_slot *slot)
 			select(max_fd+1, &readfds, &writefds, &excfds, &select_timeout);
 		}
 	}
+
+	/*
+	 * The value of slot->finished we set before the loop was used
+	 * to set our "finished" variable when our request completed.
+	 *
+	 * 1. The slot may not have been reused for another requst
+	 *    yet, in which case it still has &finished.
+	 *
+	 * 2. The slot may already be in-use to serve another request,
+	 *    which can further be divided into two cases:
+	 *
+	 * (a) If call run_active_slot() hasn't been called for that
+	 *     other request, slot->finished would have been cleared
+	 *     by get_active_slot() and has NULL.
+	 *
+	 * (b) If the request did call run_active_slot(), then the
+	 *     call would have updated slot->finished at the beginning
+	 *     of this function, and with the clearing of the member
+	 *     below, we would find that slot->finished is now NULL.
+	 *
+	 * In all cases, slot->finished has no useful information to
+	 * anybody at this point.  Some compilers warn us for
+	 * attempting to smuggle a pointer that is about to become
+	 * invalid, i.e. &finished.  We clear it here to assure them.
+	 */
+	slot->finished = NULL;
 }
 
 static void release_active_slot(struct active_request_slot *slot)
@@ -1490,6 +1533,10 @@ static int handle_curl_result(struct slot_results *results)
 		 */
 		credential_reject(&cert_auth);
 		return HTTP_NOAUTH;
+#ifdef GIT_CURL_HAVE_CURLE_SSL_PINNEDPUBKEYNOTMATCH
+	} else if (results->curl_result == CURLE_SSL_PINNEDPUBKEYNOTMATCH) {
+		return HTTP_NOMATCHPUBLICKEY;
+#endif
 	} else if (missing_target(results))
 		return HTTP_MISSING_TARGET;
 	else if (results->http_code == 401) {
@@ -1728,7 +1775,7 @@ static void write_accept_language(struct strbuf *buf)
  *   LANGUAGE= LANG=en_US.UTF-8 -> "Accept-Language: en-US, *; q=0.1"
  *   LANGUAGE= LANG=C -> ""
  */
-static const char *get_accept_language(void)
+const char *http_get_accept_language_header(void)
 {
 	if (!cached_accept_language) {
 		struct strbuf buf = STRBUF_INIT;
@@ -1765,7 +1812,7 @@ static int http_request(const char *url,
 	slot = get_active_slot();
 	curl_easy_setopt(slot->curl, CURLOPT_HTTPGET, 1);
 
-	if (result == NULL) {
+	if (!result) {
 		curl_easy_setopt(slot->curl, CURLOPT_NOBODY, 1);
 	} else {
 		curl_easy_setopt(slot->curl, CURLOPT_NOBODY, 0);
@@ -1782,7 +1829,7 @@ static int http_request(const char *url,
 					 fwrite_buffer);
 	}
 
-	accept_language = get_accept_language();
+	accept_language = http_get_accept_language_header();
 
 	if (accept_language)
 		headers = curl_slist_append(headers, accept_language);
@@ -1942,8 +1989,8 @@ int http_get_strbuf(const char *url,
  * If a previous interrupted download is detected (i.e. a previous temporary
  * file is still around) the download is resumed.
  */
-static int http_get_file(const char *url, const char *filename,
-			 struct http_get_options *options)
+int http_get_file(const char *url, const char *filename,
+		  struct http_get_options *options)
 {
 	int ret;
 	struct strbuf tmpfile = STRBUF_INIT;
@@ -2097,7 +2144,7 @@ cleanup:
 
 void release_http_pack_request(struct http_pack_request *preq)
 {
-	if (preq->packfile != NULL) {
+	if (preq->packfile) {
 		fclose(preq->packfile);
 		preq->packfile = NULL;
 	}
@@ -2123,8 +2170,9 @@ int finish_http_pack_request(struct http_pack_request *preq)
 
 	ip.git_cmd = 1;
 	ip.in = tmpfile_fd;
-	ip.argv = preq->index_pack_args ? preq->index_pack_args
-					: default_index_pack_args;
+	strvec_pushv(&ip.args, preq->index_pack_args ?
+		     preq->index_pack_args :
+		     default_index_pack_args);
 
 	if (preq->preserve_index_pack_stdout)
 		ip.out = 0;
@@ -2387,7 +2435,7 @@ abort:
 
 void process_http_object_request(struct http_object_request *freq)
 {
-	if (freq->slot == NULL)
+	if (!freq->slot)
 		return;
 	freq->curl_result = freq->slot->curl_result;
 	freq->http_code = freq->slot->http_code;
@@ -2444,7 +2492,7 @@ void release_http_object_request(struct http_object_request *freq)
 		freq->localfile = -1;
 	}
 	FREE_AND_NULL(freq->url);
-	if (freq->slot != NULL) {
+	if (freq->slot) {
 		freq->slot->callback_func = NULL;
 		freq->slot->callback_data = NULL;
 		release_active_slot(freq->slot);

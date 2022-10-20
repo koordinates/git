@@ -733,7 +733,7 @@ char *interpolate_path(const char *path, int real_home)
 	struct strbuf user_path = STRBUF_INIT;
 	const char *to_copy = path;
 
-	if (path == NULL)
+	if (!path)
 		goto return_null;
 
 	if (skip_prefix(path, "%(prefix)/", &path))
@@ -1225,11 +1225,15 @@ int longest_ancestor_length(const char *path, struct string_list *prefixes)
 		const char *ceil = prefixes->items[i].string;
 		int len = strlen(ceil);
 
-		if (len == 1 && ceil[0] == '/')
-			len = 0; /* root matches anything, with length 0 */
-		else if (!strncmp(path, ceil, len) && path[len] == '/')
-			; /* match of length len */
-		else
+		/*
+		 * For root directories (`/`, `C:/`, `//server/share/`)
+		 * adjust the length to exclude the trailing slash.
+		 */
+		if (len > 0 && ceil[len - 1] == '/')
+			len--;
+
+		if (strncmp(path, ceil, len) ||
+		    path[len] != '/' || !path[len + 1])
 			continue; /* no match */
 
 		if (len > max_len)
@@ -1409,7 +1413,7 @@ int is_ntfs_dotgit(const char *name)
 
 	for (;;) {
 		c = *(name++);
-		if (!c || c == '\\' || c == '/' || c == ':')
+		if (!c || is_xplatform_dir_sep(c) || c == ':')
 			return 1;
 		if (c != '.' && c != ' ')
 			return 0;
@@ -1510,19 +1514,26 @@ int looks_like_command_line_option(const char *str)
 	return str && str[0] == '-';
 }
 
-char *xdg_config_home(const char *filename)
+char *xdg_config_home_for(const char *subdir, const char *filename)
 {
 	const char *home, *config_home;
 
+	assert(subdir);
 	assert(filename);
 	config_home = getenv("XDG_CONFIG_HOME");
 	if (config_home && *config_home)
-		return mkpathdup("%s/git/%s", config_home, filename);
+		return mkpathdup("%s/%s/%s", config_home, subdir, filename);
 
 	home = getenv("HOME");
 	if (home)
-		return mkpathdup("%s/.config/git/%s", home, filename);
+		return mkpathdup("%s/.config/%s/%s", home, subdir, filename);
+
 	return NULL;
+}
+
+char *xdg_config_home(const char *filename)
+{
+	return xdg_config_home_for("git", filename);
 }
 
 char *xdg_cache_home(const char *filename)

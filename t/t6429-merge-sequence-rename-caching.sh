@@ -35,7 +35,7 @@ test_description="remember regular & dir renames in sequence of merges"
 # preventing us from finding new renames.
 #
 test_expect_success 'caching renames does not preclude finding new ones' '
-	test_create_repo caching-renames-and-new-renames &&
+	git init caching-renames-and-new-renames &&
 	(
 		cd caching-renames-and-new-renames &&
 
@@ -106,7 +106,7 @@ test_expect_success 'caching renames does not preclude finding new ones' '
 # should be able to only run rename detection on the upstream side one
 # time.)
 test_expect_success 'cherry-pick both a commit and its immediate revert' '
-	test_create_repo pick-commit-and-its-immediate-revert &&
+	git init pick-commit-and-its-immediate-revert &&
 	(
 		cd pick-commit-and-its-immediate-revert &&
 
@@ -162,7 +162,7 @@ test_expect_success 'cherry-pick both a commit and its immediate revert' '
 # could cause a spurious rename/add conflict.
 #
 test_expect_success 'rename same file identically, then reintroduce it' '
-	test_create_repo rename-rename-1to1-then-add-old-filename &&
+	git init rename-rename-1to1-then-add-old-filename &&
 	(
 		cd rename-rename-1to1-then-add-old-filename &&
 
@@ -229,7 +229,7 @@ test_expect_success 'rename same file identically, then reintroduce it' '
 # cached, the directory rename could put newfile in the wrong directory.
 #
 test_expect_success 'rename same file identically, then add file to old dir' '
-	test_create_repo rename-rename-1to1-then-add-file-to-old-dir &&
+	git init rename-rename-1to1-then-add-file-to-old-dir &&
 	(
 		cd rename-rename-1to1-then-add-file-to-old-dir &&
 
@@ -311,7 +311,7 @@ test_expect_success 'rename same file identically, then add file to old dir' '
 # should avoid the need to re-detect upstream renames.)
 #
 test_expect_success 'cached dir rename does not prevent noticing later conflict' '
-	test_create_repo dir-rename-cache-not-occluding-later-conflict &&
+	git init dir-rename-cache-not-occluding-later-conflict &&
 	(
 		cd dir-rename-cache-not-occluding-later-conflict &&
 
@@ -365,7 +365,7 @@ test_expect_success 'cached dir rename does not prevent noticing later conflict'
 
 # Helper for the next two tests
 test_setup_upstream_rename () {
-	test_create_repo $1 &&
+	git init $1 &&
 	(
 		cd $1 &&
 
@@ -537,7 +537,7 @@ test_expect_success 'dir rename unneeded, then rename existing file into old dir
 
 # Helper for the next two tests
 test_setup_topic_rename () {
-	test_create_repo $1 &&
+	git init $1 &&
 	(
 		cd $1 &&
 
@@ -694,6 +694,73 @@ test_expect_success 'caching renames only on upstream side, part 2' '
 		test_path_is_file newdir/newfile &&
 		test_path_is_file newdir/b &&
 		test_path_is_file newdir/a
+	)
+'
+
+#
+# The following testcase just creates two simple renames (slightly modified
+# on both sides but without conflicting changes), and a directory full of
+# files that are otherwise uninteresting.  The setup is as follows:
+#
+#   base:     unrelated/<BUNCH OF FILES>
+#             numbers
+#             values
+#   upstream: modify: numbers
+#             modify: values
+#   topic:    add: unrelated/foo
+#             modify: numbers
+#             modify: values
+#             rename: numbers -> sequence
+#             rename: values -> progression
+#
+# This is a trivial rename case, but we're curious what happens with a very
+# low renameLimit interacting with the restart optimization trying to notice
+# that unrelated/ looks like a trivial merge candidate.
+#
+test_expect_success 'avoid assuming we detected renames' '
+	git init redo-weirdness &&
+	(
+		cd redo-weirdness &&
+
+		mkdir unrelated &&
+		for i in $(test_seq 1 10)
+		do
+			>unrelated/$i || exit 1
+		done &&
+		test_seq  2 10 >numbers &&
+		test_seq 12 20 >values &&
+		git add numbers values unrelated/ &&
+		git commit -m orig &&
+
+		git branch upstream &&
+		git branch topic &&
+
+		git switch upstream &&
+		test_seq  1 10 >numbers &&
+		test_seq 11 20 >values &&
+		git add numbers &&
+		git commit -m "Some tweaks" &&
+
+		git switch topic &&
+
+		>unrelated/foo &&
+		test_seq  2 12 >numbers &&
+		test_seq 12 22 >values &&
+		git add numbers values unrelated/ &&
+		git mv numbers sequence &&
+		git mv values progression &&
+		git commit -m A &&
+
+		#
+		# Actual testing
+		#
+
+		git switch --detach topic^0 &&
+
+		test_must_fail git -c merge.renameLimit=1 rebase upstream &&
+
+		git ls-files -u >actual &&
+		test_line_count = 2 actual
 	)
 '
 

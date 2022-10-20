@@ -655,10 +655,10 @@ void parse_path_pattern(const char **pattern,
 	*patternlen = len;
 }
 
-int pl_hashmap_cmp(const void *unused_cmp_data,
+int pl_hashmap_cmp(const void *cmp_data UNUSED,
 		   const struct hashmap_entry *a,
 		   const struct hashmap_entry *b,
-		   const void *key)
+		   const void *key UNUSED)
 {
 	const struct pattern_entry *ee1 =
 			container_of(a, struct pattern_entry, ent);
@@ -727,7 +727,7 @@ static void add_pattern_to_hashsets(struct pattern_list *pl, struct path_pattern
 	}
 
 	if (given->patternlen < 2 ||
-	    *given->pattern == '*' ||
+	    *given->pattern != '/' ||
 	    strstr(given->pattern, "**")) {
 		/* Not a cone pattern. */
 		warning(_("unrecognized pattern: '%s'"), given->pattern);
@@ -819,9 +819,7 @@ static void add_pattern_to_hashsets(struct pattern_list *pl, struct path_pattern
 		/* we already included this at the parent level */
 		warning(_("your sparse-checkout file may have issues: pattern '%s' is repeated"),
 			given->pattern);
-		hashmap_remove(&pl->parent_hashmap, &translated->ent, &data);
-		free(data);
-		free(translated);
+		goto clear_hashmaps;
 	}
 
 	return;
@@ -1115,7 +1113,7 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 				       &istate->cache[pos]->oid);
 			else
 				hash_object_file(the_hash_algo, buf, size,
-						 "blob", &oid_stat->oid);
+						 OBJ_BLOB, &oid_stat->oid);
 			fill_stat_data(&oid_stat->stat, &st);
 			oid_stat->valid = 1;
 		}
@@ -1246,8 +1244,7 @@ int match_basename(const char *basename, int basenamelen,
 
 int match_pathname(const char *pathname, int pathlen,
 		   const char *base, int baselen,
-		   const char *pattern, int prefix, int patternlen,
-		   unsigned flags)
+		   const char *pattern, int prefix, int patternlen)
 {
 	const char *name;
 	int namelen;
@@ -1349,8 +1346,7 @@ static struct path_pattern *last_matching_pattern_from_list(const char *pathname
 		if (match_pathname(pathname, pathlen,
 				   pattern->base,
 				   pattern->baselen ? pattern->baselen - 1 : 0,
-				   exclude, prefix, pattern->patternlen,
-				   pattern->flags)) {
+				   exclude, prefix, pattern->patternlen)) {
 			res = pattern;
 			break;
 		}
@@ -1437,6 +1433,76 @@ enum pattern_match_result path_matches_pattern_list(
 done:
 	strbuf_release(&parent_pathname);
 	return result;
+}
+
+int init_sparse_checkout_patterns(struct index_state *istate)
+{
+	if (!core_apply_sparse_checkout)
+		return 1;
+	if (istate->sparse_checkout_patterns)
+		return 0;
+
+	CALLOC_ARRAY(istate->sparse_checkout_patterns, 1);
+
+	if (get_sparse_checkout_patterns(istate->sparse_checkout_patterns) < 0) {
+		FREE_AND_NULL(istate->sparse_checkout_patterns);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int path_in_sparse_checkout_1(const char *path,
+				     struct index_state *istate,
+				     int require_cone_mode)
+{
+	int dtype = DT_REG;
+	enum pattern_match_result match = UNDECIDED;
+	const char *end, *slash;
+
+	/*
+	 * We default to accepting a path if the path is empty, there are no
+	 * patterns, or the patterns are of the wrong type.
+	 */
+	if (!*path ||
+	    init_sparse_checkout_patterns(istate) ||
+	    (require_cone_mode &&
+	     !istate->sparse_checkout_patterns->use_cone_patterns))
+		return 1;
+
+	/*
+	 * If UNDECIDED, use the match from the parent dir (recursively), or
+	 * fall back to NOT_MATCHED at the topmost level. Note that cone mode
+	 * never returns UNDECIDED, so we will execute only one iteration in
+	 * this case.
+	 */
+	for (end = path + strlen(path);
+	     end > path && match == UNDECIDED;
+	     end = slash) {
+
+		for (slash = end - 1; slash > path && *slash != '/'; slash--)
+			; /* do nothing */
+
+		match = path_matches_pattern_list(path, end - path,
+				slash > path ? slash + 1 : path, &dtype,
+				istate->sparse_checkout_patterns, istate);
+
+		/* We are going to match the parent dir now */
+		dtype = DT_DIR;
+	}
+	return match > 0;
+}
+
+int path_in_sparse_checkout(const char *path,
+			    struct index_state *istate)
+{
+	return path_in_sparse_checkout_1(path, istate, 0);
+}
+
+int path_in_cone_mode_sparse_checkout(const char *path,
+				     struct index_state *istate)
+{
+	return path_in_sparse_checkout_1(path, istate, 1);
 }
 
 static struct path_pattern *last_matching_pattern_from_lists(
@@ -1793,7 +1859,7 @@ static enum path_treatment treat_directory(struct dir_struct *dir,
 	 */
 	enum path_treatment state;
 	int matches_how = 0;
-	int nested_repo = 0, check_only, stop_early;
+	int check_only, stop_early;
 	int old_ignored_nr, old_untracked_nr;
 	/* The "len-1" is to strip the final '/' */
 	enum exist_status status = directory_exists_in_index(istate, dirname, len-1);
@@ -1825,16 +1891,37 @@ static enum path_treatment treat_directory(struct dir_struct *dir,
 
 	if ((dir->flags & DIR_SKIP_NESTED_GIT) ||
 		!(dir->flags & DIR_NO_GITLINKS)) {
+		/*
+		 * Determine if `dirname` is a nested repo by confirming that:
+		 * 1) we are in a nonbare repository, and
+		 * 2) `dirname` is not an immediate parent of `the_repository->gitdir`,
+		 *    which could occur if the git_dir or worktree location was
+		 *    manually configured by the user; see t2205 testcases 1-3 for
+		 *    examples where this matters
+		 */
+		int nested_repo;
 		struct strbuf sb = STRBUF_INIT;
 		strbuf_addstr(&sb, dirname);
 		nested_repo = is_nonbare_repository_dir(&sb);
+
+		if (nested_repo) {
+			char *real_dirname, *real_gitdir;
+			strbuf_addstr(&sb, ".git");
+			real_dirname = real_pathdup(sb.buf, 1);
+			real_gitdir = real_pathdup(the_repository->gitdir, 1);
+
+			nested_repo = !!strcmp(real_dirname, real_gitdir);
+			free(real_gitdir);
+			free(real_dirname);
+		}
 		strbuf_release(&sb);
-	}
-	if (nested_repo) {
-		if ((dir->flags & DIR_SKIP_NESTED_GIT) ||
-		    (matches_how == MATCHED_RECURSIVELY_LEADING_PATHSPEC))
-			return path_none;
-		return excluded ? path_excluded : path_untracked;
+
+		if (nested_repo) {
+			if ((dir->flags & DIR_SKIP_NESTED_GIT) ||
+				(matches_how == MATCHED_RECURSIVELY_LEADING_PATHSPEC))
+				return path_none;
+			return excluded ? path_excluded : path_untracked;
+		}
 	}
 
 	if (!(dir->flags & DIR_SHOW_OTHER_DIRECTORIES)) {
@@ -2679,13 +2766,33 @@ static void set_untracked_ident(struct untracked_cache *uc)
 	strbuf_addch(&uc->ident, 0);
 }
 
-static void new_untracked_cache(struct index_state *istate)
+static unsigned new_untracked_cache_flags(struct index_state *istate)
+{
+	struct repository *repo = istate->repo;
+	char *val;
+
+	/*
+	 * This logic is coordinated with the setting of these flags in
+	 * wt-status.c#wt_status_collect_untracked(), and the evaluation
+	 * of the config setting in commit.c#git_status_config()
+	 */
+	if (!repo_config_get_string(repo, "status.showuntrackedfiles", &val) &&
+	    !strcmp(val, "all"))
+		return 0;
+
+	/*
+	 * The default, if "all" is not set, is "normal" - leading us here.
+	 * If the value is "none" then it really doesn't matter.
+	 */
+	return DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
+}
+
+static void new_untracked_cache(struct index_state *istate, int flags)
 {
 	struct untracked_cache *uc = xcalloc(1, sizeof(*uc));
 	strbuf_init(&uc->ident, 100);
 	uc->exclude_per_dir = ".gitignore";
-	/* should be the same flags used by git-status */
-	uc->dir_flags = DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
+	uc->dir_flags = flags >= 0 ? flags : new_untracked_cache_flags(istate);
 	set_untracked_ident(uc);
 	istate->untracked = uc;
 	istate->cache_changed |= UNTRACKED_CHANGED;
@@ -2694,11 +2801,11 @@ static void new_untracked_cache(struct index_state *istate)
 void add_untracked_cache(struct index_state *istate)
 {
 	if (!istate->untracked) {
-		new_untracked_cache(istate);
+		new_untracked_cache(istate, -1);
 	} else {
 		if (!ident_in_untracked(istate->untracked)) {
 			free_untracked_cache(istate->untracked);
-			new_untracked_cache(istate);
+			new_untracked_cache(istate, -1);
 		}
 	}
 }
@@ -2714,7 +2821,8 @@ void remove_untracked_cache(struct index_state *istate)
 
 static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *dir,
 						      int base_len,
-						      const struct pathspec *pathspec)
+						      const struct pathspec *pathspec,
+						      struct index_state *istate)
 {
 	struct untracked_cache_dir *root;
 	static int untracked_cache_disabled = -1;
@@ -2745,17 +2853,9 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	if (base_len || (pathspec && pathspec->nr))
 		return NULL;
 
-	/* Different set of flags may produce different results */
-	if (dir->flags != dir->untracked->dir_flags ||
-	    /*
-	     * See treat_directory(), case index_nonexistent. Without
-	     * this flag, we may need to also cache .git file content
-	     * for the resolve_gitlink_ref() call, which we don't.
-	     */
-	    !(dir->flags & DIR_SHOW_OTHER_DIRECTORIES) ||
-	    /* We don't support collecting ignore files */
-	    (dir->flags & (DIR_SHOW_IGNORED | DIR_SHOW_IGNORED_TOO |
-			   DIR_COLLECT_IGNORED)))
+	/* We don't support collecting ignore files */
+	if (dir->flags & (DIR_SHOW_IGNORED | DIR_SHOW_IGNORED_TOO |
+			DIR_COLLECT_IGNORED))
 		return NULL;
 
 	/*
@@ -2778,8 +2878,55 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 	}
 
-	if (!dir->untracked->root)
+	/*
+	 * If the untracked structure we received does not have the same flags
+	 * as requested in this run, we're going to need to either discard the
+	 * existing structure (and potentially later recreate), or bypass the
+	 * untracked cache mechanism for this run.
+	 */
+	if (dir->flags != dir->untracked->dir_flags) {
+		/*
+		 * If the untracked structure we received does not have the same flags
+		 * as configured, then we need to reset / create a new "untracked"
+		 * structure to match the new config.
+		 *
+		 * Keeping the saved and used untracked cache consistent with the
+		 * configuration provides an opportunity for frequent users of
+		 * "git status -uall" to leverage the untracked cache by aligning their
+		 * configuration - setting "status.showuntrackedfiles" to "all" or
+		 * "normal" as appropriate.
+		 *
+		 * Previously using -uall (or setting "status.showuntrackedfiles" to
+		 * "all") was incompatible with untracked cache and *consistently*
+		 * caused surprisingly bad performance (with fscache and fsmonitor
+		 * enabled) on Windows.
+		 *
+		 * IMPROVEMENT OPPORTUNITY: If we reworked the untracked cache storage
+		 * to not be as bound up with the desired output in a given run,
+		 * and instead iterated through and stored enough information to
+		 * correctly serve both "modes", then users could get peak performance
+		 * with or without '-uall' regardless of their
+		 * "status.showuntrackedfiles" config.
+		 */
+		if (dir->untracked->dir_flags != new_untracked_cache_flags(istate)) {
+			free_untracked_cache(istate->untracked);
+			new_untracked_cache(istate, dir->flags);
+			dir->untracked = istate->untracked;
+		}
+		else {
+			/*
+			 * Current untracked cache data is consistent with config, but not
+			 * usable in this request/run; just bypass untracked cache.
+			 */
+			return NULL;
+		}
+	}
+
+	if (!dir->untracked->root) {
+		/* Untracked cache existed but is not initialized; fix that */
 		FLEX_ALLOC_STR(dir->untracked->root, name, "");
+		istate->cache_changed |= UNTRACKED_CHANGED;
+	}
 
 	/* Validate $GIT_DIR/info/exclude and core.excludesfile */
 	root = dir->untracked->root;
@@ -2849,7 +2996,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		return dir->nr;
 	}
 
-	untracked = validate_untracked_cache(dir, len, pathspec);
+	untracked = validate_untracked_cache(dir, len, pathspec, istate);
 	if (!untracked)
 		/*
 		 * make sure untracked cache code path is disabled,
@@ -2869,7 +3016,9 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 
 		if (force_untracked_cache < 0)
 			force_untracked_cache =
-				git_env_bool("GIT_FORCE_UNTRACKED_CACHE", 0);
+				git_env_bool("GIT_FORCE_UNTRACKED_CACHE", -1);
+		if (force_untracked_cache < 0)
+			force_untracked_cache = (istate->repo->settings.core_untracked_cache == UNTRACKED_CACHE_WRITE);
 		if (force_untracked_cache &&
 			dir->untracked == istate->untracked &&
 		    (dir->untracked->dir_opened ||
@@ -2970,6 +3119,129 @@ int is_empty_dir(const char *path)
 	return ret;
 }
 
+char *git_url_basename(const char *repo, int is_bundle, int is_bare)
+{
+	const char *end = repo + strlen(repo), *start, *ptr;
+	size_t len;
+	char *dir;
+
+	/*
+	 * Skip scheme.
+	 */
+	start = strstr(repo, "://");
+	if (!start)
+		start = repo;
+	else
+		start += 3;
+
+	/*
+	 * Skip authentication data. The stripping does happen
+	 * greedily, such that we strip up to the last '@' inside
+	 * the host part.
+	 */
+	for (ptr = start; ptr < end && !is_dir_sep(*ptr); ptr++) {
+		if (*ptr == '@')
+			start = ptr + 1;
+	}
+
+	/*
+	 * Strip trailing spaces, slashes and /.git
+	 */
+	while (start < end && (is_dir_sep(end[-1]) || isspace(end[-1])))
+		end--;
+	if (end - start > 5 && is_dir_sep(end[-5]) &&
+	    !strncmp(end - 4, ".git", 4)) {
+		end -= 5;
+		while (start < end && is_dir_sep(end[-1]))
+			end--;
+	}
+
+	/*
+	 * It should not be possible to overflow `ptrdiff_t` by passing in an
+	 * insanely long URL, but GCC does not know that and will complain
+	 * without this check.
+	 */
+	if (end - start < 0)
+		die(_("No directory name could be guessed.\n"
+		      "Please specify a directory on the command line"));
+
+	/*
+	 * Strip trailing port number if we've got only a
+	 * hostname (that is, there is no dir separator but a
+	 * colon). This check is required such that we do not
+	 * strip URI's like '/foo/bar:2222.git', which should
+	 * result in a dir '2222' being guessed due to backwards
+	 * compatibility.
+	 */
+	if (memchr(start, '/', end - start) == NULL
+	    && memchr(start, ':', end - start) != NULL) {
+		ptr = end;
+		while (start < ptr && isdigit(ptr[-1]) && ptr[-1] != ':')
+			ptr--;
+		if (start < ptr && ptr[-1] == ':')
+			end = ptr - 1;
+	}
+
+	/*
+	 * Find last component. To remain backwards compatible we
+	 * also regard colons as path separators, such that
+	 * cloning a repository 'foo:bar.git' would result in a
+	 * directory 'bar' being guessed.
+	 */
+	ptr = end;
+	while (start < ptr && !is_dir_sep(ptr[-1]) && ptr[-1] != ':')
+		ptr--;
+	start = ptr;
+
+	/*
+	 * Strip .{bundle,git}.
+	 */
+	len = end - start;
+	strip_suffix_mem(start, &len, is_bundle ? ".bundle" : ".git");
+
+	if (!len || (len == 1 && *start == '/'))
+		die(_("No directory name could be guessed.\n"
+		      "Please specify a directory on the command line"));
+
+	if (is_bare)
+		dir = xstrfmt("%.*s.git", (int)len, start);
+	else
+		dir = xstrndup(start, len);
+	/*
+	 * Replace sequences of 'control' characters and whitespace
+	 * with one ascii space, remove leading and trailing spaces.
+	 */
+	if (*dir) {
+		char *out = dir;
+		int prev_space = 1 /* strip leading whitespace */;
+		for (end = dir; *end; ++end) {
+			char ch = *end;
+			if ((unsigned char)ch < '\x20')
+				ch = '\x20';
+			if (isspace(ch)) {
+				if (prev_space)
+					continue;
+				prev_space = 1;
+			} else
+				prev_space = 0;
+			*out++ = ch;
+		}
+		*out = '\0';
+		if (out > dir && prev_space)
+			out[-1] = '\0';
+	}
+	return dir;
+}
+
+void strip_dir_trailing_slashes(char *dir)
+{
+	char *end = dir + strlen(dir);
+
+	while (dir < end - 1 && is_dir_sep(end[-1]))
+		end--;
+	*end = '\0';
+}
+
 static int remove_dir_recurse(struct strbuf *path, int flag, int *kept_up)
 {
 	DIR *dir;
@@ -2977,6 +3249,7 @@ static int remove_dir_recurse(struct strbuf *path, int flag, int *kept_up)
 	int ret = 0, original_len = path->len, len, kept_down = 0;
 	int only_empty = (flag & REMOVE_DIR_EMPTY_ONLY);
 	int keep_toplevel = (flag & REMOVE_DIR_KEEP_TOPLEVEL);
+	int purge_original_cwd = (flag & REMOVE_DIR_PURGE_ORIGINAL_CWD);
 	struct object_id submodule_head;
 
 	if ((flag & REMOVE_DIR_KEEP_NESTED_GIT) &&
@@ -3032,9 +3305,14 @@ static int remove_dir_recurse(struct strbuf *path, int flag, int *kept_up)
 	closedir(dir);
 
 	strbuf_setlen(path, original_len);
-	if (!ret && !keep_toplevel && !kept_down)
-		ret = (!rmdir(path->buf) || errno == ENOENT) ? 0 : -1;
-	else if (kept_up)
+	if (!ret && !keep_toplevel && !kept_down) {
+		if (!purge_original_cwd &&
+		    startup_info->original_cwd &&
+		    !strcmp(startup_info->original_cwd, path->buf))
+			ret = -1; /* Do not remove current working directory */
+		else
+			ret = (!rmdir(path->buf) || errno == ENOENT) ? 0 : -1;
+	} else if (kept_up)
 		/*
 		 * report the uplevel that it is not an error that we
 		 * did not rmdir() our directory.
@@ -3100,6 +3378,9 @@ int remove_path(const char *name)
 		slash = dirs + (slash - name);
 		do {
 			*slash = '\0';
+			if (startup_info->original_cwd &&
+			    !strcmp(startup_info->original_cwd, dirs))
+				break;
 		} while (rmdir(dirs) == 0 && (slash = strrchr(dirs, '/')));
 		free(dirs);
 	}
@@ -3633,7 +3914,7 @@ static void connect_wt_gitdir_in_nested(const char *sub_worktree,
 		strbuf_reset(&sub_wt);
 		strbuf_reset(&sub_gd);
 		strbuf_addf(&sub_wt, "%s/%s", sub_worktree, sub->path);
-		strbuf_addf(&sub_gd, "%s/modules/%s", sub_gitdir, sub->name);
+		submodule_name_to_gitdir(&sub_gd, &subrepo, sub->name);
 
 		connect_work_tree_and_git_dir(sub_wt.buf, sub_gd.buf, 1);
 	}
@@ -3692,4 +3973,33 @@ void relocate_gitdir(const char *path, const char *old_git_dir, const char *new_
 			old_git_dir, new_git_dir);
 
 	connect_work_tree_and_git_dir(path, new_git_dir, 0);
+}
+
+int path_match_flags(const char *const str, const enum path_match_flags flags)
+{
+	const char *p = str;
+
+	if (flags & PATH_MATCH_NATIVE &&
+	    flags & PATH_MATCH_XPLATFORM)
+		BUG("path_match_flags() must get one match kind, not multiple!");
+	else if (!(flags & PATH_MATCH_KINDS_MASK))
+		BUG("path_match_flags() must get at least one match kind!");
+
+	if (flags & PATH_MATCH_STARTS_WITH_DOT_SLASH &&
+	    flags & PATH_MATCH_STARTS_WITH_DOT_DOT_SLASH)
+		BUG("path_match_flags() must get one platform kind, not multiple!");
+	else if (!(flags & PATH_MATCH_PLATFORM_MASK))
+		BUG("path_match_flags() must get at least one platform kind!");
+
+	if (*p++ != '.')
+		return 0;
+	if (flags & PATH_MATCH_STARTS_WITH_DOT_DOT_SLASH &&
+	    *p++ != '.')
+		return 0;
+
+	if (flags & PATH_MATCH_NATIVE)
+		return is_dir_sep(*p);
+	else if (flags & PATH_MATCH_XPLATFORM)
+		return is_xplatform_dir_sep(*p);
+	BUG("unreachable");
 }

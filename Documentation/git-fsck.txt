@@ -12,7 +12,7 @@ SYNOPSIS
 'git fsck' [--tags] [--root] [--unreachable] [--cache] [--no-reflogs]
 	 [--[no-]full] [--strict] [--verbose] [--lost-found]
 	 [--[no-]dangling] [--[no-]progress] [--connectivity-only]
-	 [--[no-]name-objects] [<object>*]
+	 [--[no-]name-objects] [<object>...]
 
 DESCRIPTION
 -----------
@@ -106,6 +106,8 @@ care about this output and want to speed it up further.
 
 CONFIGURATION
 -------------
+
+include::includes/cmd-config-section-all.txt[]
 
 include::config/fsck.txt[]
 

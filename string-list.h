@@ -86,7 +86,8 @@ typedef int (*compare_strings_fn)(const char *, const char *);
  */
 struct string_list {
 	struct string_list_item *items;
-	unsigned int nr, alloc;
+	size_t nr;
+	size_t alloc;
 	unsigned int strdup_strings:1;
 	compare_strings_fn cmp; /* NULL uses strcmp() */
 };
@@ -103,11 +104,6 @@ struct string_list {
  */
 void string_list_init_nodup(struct string_list *list);
 void string_list_init_dup(struct string_list *list);
-
-/**
- * TODO remove: For compatibility with any in-flight older API users
- */
-void string_list_init(struct string_list *list, int strdup_strings);
 
 /** Callback function type for for_each_string_list */
 typedef int (*string_list_each_func_t)(struct string_list_item *, void *);

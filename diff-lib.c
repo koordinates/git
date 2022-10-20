@@ -117,6 +117,10 @@ int run_diff_files(struct rev_info *revs, unsigned int option)
 		if (!ce_path_match(istate, ce, &revs->prune_data, NULL))
 			continue;
 
+		if (revs->diffopt.prefix &&
+		    strncmp(ce->name, revs->diffopt.prefix, revs->diffopt.prefix_length))
+			continue;
+
 		if (ce_stage(ce)) {
 			struct combine_diff_path *dpath;
 			struct diff_filepair *pair;
@@ -462,6 +466,11 @@ static void do_oneway_diff(struct unpack_trees_options *o,
 	 * Something removed from the tree?
 	 */
 	if (!idx) {
+		if (S_ISSPARSEDIR(tree->ce_mode)) {
+			diff_tree_oid(&tree->oid, NULL, tree->name, &revs->diffopt);
+			return;
+		}
+
 		diff_index_show_file(revs, "-", tree, &tree->oid, 1,
 				     tree->ce_mode, 0);
 		return;
@@ -637,7 +646,7 @@ int do_diff_cache(const struct object_id *tree_oid, struct diff_options *opt)
 
 	if (diff_cache(&revs, tree_oid, NULL, 1))
 		exit(128);
-	clear_pathspec(&revs.prune_data);
+	release_revisions(&revs);
 	return 0;
 }
 
@@ -647,6 +656,7 @@ int index_differs_from(struct repository *r,
 {
 	struct rev_info rev;
 	struct setup_revision_opt opt;
+	unsigned has_changes;
 
 	repo_init_revisions(r, &rev, NULL);
 	memset(&opt, 0, sizeof(opt));
@@ -658,8 +668,9 @@ int index_differs_from(struct repository *r,
 		diff_flags_or(&rev.diffopt.flags, flags);
 	rev.diffopt.ita_invisible_in_index = ita_invisible_in_index;
 	run_diff_index(&rev, 1);
-	object_array_clear(&rev.pending);
-	return (rev.diffopt.flags.has_changes != 0);
+	has_changes = rev.diffopt.flags.has_changes;
+	release_revisions(&rev);
+	return (has_changes != 0);
 }
 
 static struct strbuf *idiff_prefix_cb(struct diff_options *opt, void *data)

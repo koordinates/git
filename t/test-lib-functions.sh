@@ -137,33 +137,110 @@ test_tick () {
 # Stop execution and start a shell. This is useful for debugging tests.
 #
 # Be sure to remove all invocations of this command before submitting.
+# WARNING: the shell invoked by this helper does not have the same environment
+# as the one running the tests (shell variables and functions are not
+# available, and the options below further modify the environment). As such,
+# commands copied from a test script might behave differently than when
+# running the test.
+#
+# Usage: test_pause [options]
+#   -t
+#	Use your original TERM instead of test-lib.sh's "dumb".
+#	This usually restores color output in the invoked shell.
+#   -s
+#	Invoke $SHELL instead of $TEST_SHELL_PATH.
+#   -h
+#	Use your original HOME instead of test-lib.sh's "$TRASH_DIRECTORY".
+#	This allows you to use your regular shell environment and Git aliases.
+#	CAUTION: running commands copied from a test script into the paused shell
+#	might result in files in your HOME being overwritten.
+#   -a
+#	Shortcut for -t -s -h
 
 test_pause () {
-	"$SHELL_PATH" <&6 >&5 2>&7
+	PAUSE_TERM=$TERM &&
+	PAUSE_SHELL=$TEST_SHELL_PATH &&
+	PAUSE_HOME=$HOME &&
+	while test $# != 0
+	do
+		case "$1" in
+		-t)
+			PAUSE_TERM="$USER_TERM"
+			;;
+		-s)
+			PAUSE_SHELL="$SHELL"
+			;;
+		-h)
+			PAUSE_HOME="$USER_HOME"
+			;;
+		-a)
+			PAUSE_TERM="$USER_TERM"
+			PAUSE_SHELL="$SHELL"
+			PAUSE_HOME="$USER_HOME"
+			;;
+		*)
+			break
+			;;
+		esac
+		shift
+	done &&
+	TERM="$PAUSE_TERM" HOME="$PAUSE_HOME" "$PAUSE_SHELL" <&6 >&5 2>&7
 }
 
 # Wrap git with a debugger. Adding this to a command can make it easier
 # to understand what is going on in a failing test.
+#
+# Usage: debug [options] <git command>
+#   -d <debugger>
+#   --debugger=<debugger>
+#	Use <debugger> instead of GDB
+#   -t
+#	Use your original TERM instead of test-lib.sh's "dumb".
+#	This usually restores color output in the debugger.
+#	WARNING: the command being debugged might behave differently than when
+#	running the test.
 #
 # Examples:
 #     debug git checkout master
 #     debug --debugger=nemiver git $ARGS
 #     debug -d "valgrind --tool=memcheck --track-origins=yes" git $ARGS
 debug () {
-	case "$1" in
-	-d)
-		GIT_DEBUGGER="$2" &&
-		shift 2
-		;;
-	--debugger=*)
-		GIT_DEBUGGER="${1#*=}" &&
-		shift 1
-		;;
-	*)
-		GIT_DEBUGGER=1
-		;;
-	esac &&
-	GIT_DEBUGGER="${GIT_DEBUGGER}" "$@" <&6 >&5 2>&7
+	GIT_DEBUGGER=1 &&
+	DEBUG_TERM=$TERM &&
+	while test $# != 0
+	do
+		case "$1" in
+		-t)
+			DEBUG_TERM="$USER_TERM"
+			;;
+		-d)
+			GIT_DEBUGGER="$2" &&
+			shift
+			;;
+		--debugger=*)
+			GIT_DEBUGGER="${1#*=}"
+			;;
+		*)
+			break
+			;;
+		esac
+		shift
+	done &&
+
+	dotfiles=".gdbinit .lldbinit"
+
+	for dotfile in $dotfiles
+	do
+		dotfile="$USER_HOME/$dotfile" &&
+		test -f "$dotfile" && cp "$dotfile" "$HOME" || :
+	done &&
+
+	TERM="$DEBUG_TERM" GIT_DEBUGGER="${GIT_DEBUGGER}" "$@" <&6 >&5 2>&7 &&
+
+	for dotfile in $dotfiles
+	do
+		rm -f "$HOME/$dotfile"
+	done
 }
 
 # Usage: test_commit [options] <message> [<file> [<contents> [<tag>]]]
@@ -252,7 +329,7 @@ test_commit () {
 	else
 		$echo "${3-$1}" >"$indir$file"
 	fi &&
-	git ${indir:+ -C "$indir"} add "$file" &&
+	git ${indir:+ -C "$indir"} add -- "$file" &&
 	if test -z "$notick"
 	then
 		test_tick
@@ -474,13 +551,89 @@ write_script () {
 	chmod +x "$1"
 }
 
+# Usage: test_hook [options] <hook-name> <<-\EOF
+#
+#   -C <dir>:
+#	Run all git commands in directory <dir>
+#   --setup
+#	Setup a hook for subsequent tests, i.e. don't remove it in a
+#	"test_when_finished"
+#   --clobber
+#	Overwrite an existing <hook-name>, if it exists. Implies
+#	--setup (i.e. the "test_when_finished" is assumed to have been
+#	set up already).
+#    --disable
+#	Disable (chmod -x) an existing <hook-name>, which must exist.
+#    --remove
+#	Remove (rm -f) an existing <hook-name>, which must exist.
+test_hook () {
+	setup= &&
+	clobber= &&
+	disable= &&
+	remove= &&
+	indir= &&
+	while test $# != 0
+	do
+		case "$1" in
+		-C)
+			indir="$2" &&
+			shift
+			;;
+		--setup)
+			setup=t
+			;;
+		--clobber)
+			clobber=t
+			;;
+		--disable)
+			disable=t
+			;;
+		--remove)
+			remove=t
+			;;
+		-*)
+			BUG "invalid argument: $1"
+			;;
+		*)
+			break
+			;;
+		esac &&
+		shift
+	done &&
+
+	git_dir=$(git -C "$indir" rev-parse --absolute-git-dir) &&
+	hook_dir="$git_dir/hooks" &&
+	hook_file="$hook_dir/$1" &&
+	if test -n "$disable$remove"
+	then
+		test_path_is_file "$hook_file" &&
+		if test -n "$disable"
+		then
+			chmod -x "$hook_file"
+		elif test -n "$remove"
+		then
+			rm -f "$hook_file"
+		fi &&
+		return 0
+	fi &&
+	if test -z "$clobber"
+	then
+		test_path_is_missing "$hook_file"
+	fi &&
+	if test -z "$setup$clobber"
+	then
+		test_when_finished "rm \"$hook_file\""
+	fi &&
+	write_script "$hook_file"
+}
+
 # Use test_set_prereq to tell that a particular prerequisite is available.
 # The prerequisite can later be checked for in two ways:
 #
 # - Explicitly using test_have_prereq.
 #
 # - Implicitly by specifying the prerequisite tag in the calls to
-#   test_expect_{success,failure} and test_external{,_without_stderr}.
+#   test_expect_{success,failure}
 #
 # The single parameter is the prerequisite tag (a simple word, in all
 # capital letters by convention).
@@ -498,8 +651,7 @@ test_set_prereq () {
 		# test_unset_prereq()
 		!*)
 			;;
-		# (Temporary?) whitelist of things we can't easily
-		# pretend not to support
+		# List of things we can't easily pretend to not support
 		SYMLINKS)
 			;;
 		# Inspecting whether GIT_TEST_FAIL_PREREQS is on
@@ -603,6 +755,17 @@ test_have_prereq () {
 			# Keep a list of missing prerequisites; restore
 			# the negative marker if necessary.
 			prerequisite=${negative_prereq:+!}$prerequisite
+
+			# Abort if this prereq was marked as required
+			if test -n "$GIT_TEST_REQUIRE_PREREQ"
+			then
+				case " $GIT_TEST_REQUIRE_PREREQ " in
+				*" $prerequisite "*)
+					BAIL_OUT "required prereq $prerequisite failed"
+					;;
+				esac
+			fi
+
 			if test -z "$missing_prereq"
 			then
 				missing_prereq=$prerequisite
@@ -631,7 +794,7 @@ test_verify_prereq () {
 }
 
 test_expect_failure () {
-	test_start_
+	test_start_ "$@"
 	test "$#" = 3 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 2 ||
 	BUG "not 2 or 3 parameters to test-expect-failure"
@@ -639,6 +802,7 @@ test_expect_failure () {
 	export test_prereq
 	if ! test_skip "$@"
 	then
+		test -n "$test_skip_test_preamble" ||
 		say >&3 "checking known breakage of $TEST_NUMBER.$test_count '$1': $2"
 		if test_run_ "$2" expecting_failure
 		then
@@ -651,7 +815,7 @@ test_expect_failure () {
 }
 
 test_expect_success () {
-	test_start_
+	test_start_ "$@"
 	test "$#" = 3 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 2 ||
 	BUG "not 2 or 3 parameters to test-expect-success"
@@ -659,6 +823,7 @@ test_expect_success () {
 	export test_prereq
 	if ! test_skip "$@"
 	then
+		test -n "$test_skip_test_preamble" ||
 		say >&3 "expecting success of $TEST_NUMBER.$test_count '$1': $2"
 		if test_run_ "$2"
 		then
@@ -668,93 +833,6 @@ test_expect_success () {
 		fi
 	fi
 	test_finish_
-}
-
-# test_external runs external test scripts that provide continuous
-# test output about their progress, and succeeds/fails on
-# zero/non-zero exit code.  It outputs the test output on stdout even
-# in non-verbose mode, and announces the external script with "# run
-# <n>: ..." before running it.  When providing relative paths, keep in
-# mind that all scripts run in "trash directory".
-# Usage: test_external description command arguments...
-# Example: test_external 'Perl API' perl ../path/to/test.pl
-test_external () {
-	test "$#" = 4 && { test_prereq=$1; shift; } || test_prereq=
-	test "$#" = 3 ||
-	BUG "not 3 or 4 parameters to test_external"
-	descr="$1"
-	shift
-	test_verify_prereq
-	export test_prereq
-	if ! test_skip "$descr" "$@"
-	then
-		# Announce the script to reduce confusion about the
-		# test output that follows.
-		say_color "" "# run $test_count: $descr ($*)"
-		# Export TEST_DIRECTORY, TRASH_DIRECTORY and GIT_TEST_LONG
-		# to be able to use them in script
-		export TEST_DIRECTORY TRASH_DIRECTORY GIT_TEST_LONG
-		# Run command; redirect its stderr to &4 as in
-		# test_run_, but keep its stdout on our stdout even in
-		# non-verbose mode.
-		"$@" 2>&4
-		if test "$?" = 0
-		then
-			if test $test_external_has_tap -eq 0; then
-				test_ok_ "$descr"
-			else
-				say_color "" "# test_external test $descr was ok"
-				test_success=$(($test_success + 1))
-			fi
-		else
-			if test $test_external_has_tap -eq 0; then
-				test_failure_ "$descr" "$@"
-			else
-				say_color error "# test_external test $descr failed: $@"
-				test_failure=$(($test_failure + 1))
-			fi
-		fi
-	fi
-}
-
-# Like test_external, but in addition tests that the command generated
-# no output on stderr.
-test_external_without_stderr () {
-	# The temporary file has no (and must have no) security
-	# implications.
-	tmp=${TMPDIR:-/tmp}
-	stderr="$tmp/git-external-stderr.$$.tmp"
-	test_external "$@" 4> "$stderr"
-	test -f "$stderr" || error "Internal error: $stderr disappeared."
-	descr="no stderr: $1"
-	shift
-	say >&3 "# expecting no stderr from previous command"
-	if test ! -s "$stderr"
-	then
-		rm "$stderr"
-
-		if test $test_external_has_tap -eq 0; then
-			test_ok_ "$descr"
-		else
-			say_color "" "# test_external_without_stderr test $descr was ok"
-			test_success=$(($test_success + 1))
-		fi
-	else
-		if test "$verbose" = t
-		then
-			output=$(echo; echo "# Stderr is:"; cat "$stderr")
-		else
-			output=
-		fi
-		# rm first in case test_failure exits.
-		rm "$stderr"
-		if test $test_external_has_tap -eq 0; then
-			test_failure_ "$descr" "$@" "$output"
-		else
-			say_color error "# test_external_without_stderr test $descr failed: $@: $output"
-			test_failure=$(($test_failure + 1))
-		fi
-	fi
 }
 
 # debugging-friendly alternatives to "test [-f|-d|-e]"
@@ -768,6 +846,16 @@ test_path_is_file () {
 	fi
 }
 
+test_path_is_file_not_symlink () {
+	test "$#" -ne 1 && BUG "1 param"
+	test_path_is_file "$1" &&
+	if test -h "$1"
+	then
+		echo "$1 shouldn't be a symbolic link"
+		false
+	fi
+}
+
 test_path_is_dir () {
 	test "$#" -ne 1 && BUG "1 param"
 	if ! test -d "$1"
@@ -777,11 +865,30 @@ test_path_is_dir () {
 	fi
 }
 
+test_path_is_dir_not_symlink () {
+	test "$#" -ne 1 && BUG "1 param"
+	test_path_is_dir "$1" &&
+	if test -h "$1"
+	then
+		echo "$1 shouldn't be a symbolic link"
+		false
+	fi
+}
+
 test_path_exists () {
 	test "$#" -ne 1 && BUG "1 param"
 	if ! test -e "$1"
 	then
 		echo "Path $1 doesn't exist"
+		false
+	fi
+}
+
+test_path_is_symlink () {
+	test "$#" -ne 1 && BUG "1 param"
+	if ! test -h "$1"
+	then
+		echo "Symbolic link $1 doesn't exist"
 		false
 	fi
 }
@@ -1589,6 +1696,16 @@ test_oid_to_path () {
 	echo "${1%$basename}/$basename"
 }
 
+# Parse oids from git ls-files --staged output
+test_parse_ls_files_stage_oids () {
+	awk '{print $2}' -
+}
+
+# Parse oids from git ls-tree output
+test_parse_ls_tree_oids () {
+	awk '{print $3}' -
+}
+
 # Choose a port number based on the test script's number and store it in
 # the given variable name, unless that variable already contains a number.
 test_set_port () {
@@ -1717,4 +1834,37 @@ test_region () {
 # the same as the readlink command, but it's not available everywhere.
 test_readlink () {
 	perl -le 'print readlink($_) for @ARGV' "$@"
+}
+
+# Set mtime to a fixed "magic" timestamp in mid February 2009, before we
+# run an operation that may or may not touch the file.  If the file was
+# touched, its timestamp will not accidentally have such an old timestamp,
+# as long as your filesystem clock is reasonably correct.  To verify the
+# timestamp, follow up with test_is_magic_mtime.
+#
+# An optional increment to the magic timestamp may be specified as second
+# argument.
+test_set_magic_mtime () {
+	local inc=${2:-0} &&
+	local mtime=$((1234567890 + $inc)) &&
+	test-tool chmtime =$mtime "$1" &&
+	test_is_magic_mtime "$1" $inc
+}
+
+# Test whether the given file has the "magic" mtime set.  This is meant to
+# be used in combination with test_set_magic_mtime.
+#
+# An optional increment to the magic timestamp may be specified as second
+# argument.  Usually, this should be the same increment which was used for
+# the associated test_set_magic_mtime.
+test_is_magic_mtime () {
+	local inc=${2:-0} &&
+	local mtime=$((1234567890 + $inc)) &&
+	echo $mtime >.git/test-mtime-expect &&
+	test-tool chmtime --get "$1" >.git/test-mtime-actual &&
+	test_cmp .git/test-mtime-expect .git/test-mtime-actual
+	local ret=$?
+	rm -f .git/test-mtime-expect
+	rm -f .git/test-mtime-actual
+	return $ret
 }

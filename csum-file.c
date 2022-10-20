@@ -58,7 +58,8 @@ static void free_hashfile(struct hashfile *f)
 	free(f);
 }
 
-int finalize_hashfile(struct hashfile *f, unsigned char *result, unsigned int flags)
+int finalize_hashfile(struct hashfile *f, unsigned char *result,
+		      enum fsync_component component, unsigned int flags)
 {
 	int fd;
 
@@ -69,7 +70,7 @@ int finalize_hashfile(struct hashfile *f, unsigned char *result, unsigned int fl
 	if (flags & CSUM_HASH_IN_STREAM)
 		flush(f, f->buffer, the_hash_algo->rawsz);
 	if (flags & CSUM_FSYNC)
-		fsync_or_die(f->fd, f->name);
+		fsync_component_or_die(component, f->fd, f->name);
 	if (flags & CSUM_CLOSE) {
 		if (close(f->fd))
 			die_errno("%s: sha1 file error on close", f->name);
@@ -131,12 +132,8 @@ struct hashfile *hashfd_check(const char *name)
 	int sink, check;
 	struct hashfile *f;
 
-	sink = open("/dev/null", O_WRONLY);
-	if (sink < 0)
-		die_errno("unable to open /dev/null");
-	check = open(name, O_RDONLY);
-	if (check < 0)
-		die_errno("unable to open '%s'", name);
+	sink = xopen("/dev/null", O_WRONLY);
+	check = xopen(name, O_RDONLY);
 	f = hashfd(sink, name);
 	f->check_fd = check;
 	f->check_buffer = xmalloc(f->buffer_len);
