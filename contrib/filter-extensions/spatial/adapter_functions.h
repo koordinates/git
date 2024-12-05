@@ -1,5 +1,6 @@
 #ifndef SPATIAL_FILTER_ADAPTER_FUNCTIONS_H
 #define SPATIAL_FILTER_ADAPTER_FUNCTIONS_H
+#include <stdint.h>
 
 // C++ compatible header that allows access to C structs
 // or functions that are defined in C++ incompatible headers.
